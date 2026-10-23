@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Lock 'n' Roll</title>
+<style>
+  :root{
+    --bg:#f4f1ea; --panel:#fffdf7; --ink:#26221c; --muted:#7c7362;
+    --line:#e2dccd; --accent:#c2410c; --accent2:#1d4ed8;
+    --die-red:#e5484d; --die-green:#2f9e63; --die-blue:#3b6fe0; --die-amber:#e9a319;
+    --joker:linear-gradient(135deg,#7c3aed,#db2777);
+    --shadow:0 2px 6px rgba(0,0,0,.12);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#17150f; --panel:#221f18; --ink:#efe9db; --muted:#9a917d;
+      --line:#38332690; --accent:#fb923c; --accent2:#93b4ff;
+      --shadow:0 2px 8px rgba(0,0,0,.4);
+    }
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
+    -webkit-tap-highlight-color:transparent;}
+  #app{max-width:440px;margin:0 auto;padding:14px 14px 40px;}
+  header{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:10px;}
+  h1{font-size:19px;letter-spacing:.16em;margin:0;font-weight:800;}
+  h1 span{color:var(--accent);}
+  .scores{display:flex;gap:14px;font-size:11px;letter-spacing:.08em;color:var(--muted);text-align:right;}
+  .scores b{display:block;font-size:17px;color:var(--ink);letter-spacing:0;font-variant-numeric:tabular-nums;}
+  #muteBtn{flex:0 0 auto;border-radius:20px;border:1px solid var(--line);
+    background:var(--panel);color:var(--ink);font-size:12px;font-weight:700;letter-spacing:.04em;
+    line-height:1;cursor:pointer;display:flex;align-items:center;gap:5px;padding:7px 12px;}
+  #muteBtn .ic{font-size:15px;}
+  #score.bump{animation:bump .35s ease;}
+  @keyframes bump{0%{transform:scale(1)}40%{transform:scale(1.28);color:var(--accent)}100%{transform:scale(1)}}
+
+  .meter{position:relative;height:10px;border-radius:6px;background:var(--panel);
+    border:1px solid var(--line);overflow:hidden;margin-bottom:4px;}
+  #meterFill{position:absolute;inset:0;width:0;background:linear-gradient(90deg,var(--accent2),var(--accent));
+    transition:width .35s ease;}
+  #meterLabel{display:block;text-align:center;font-size:10px;letter-spacing:.14em;
+    color:var(--muted);margin-bottom:14px;}
+
+  #board{position:relative;display:grid;grid-template-columns:repeat(4,1fr);gap:8px;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:8px;box-shadow:var(--shadow);}
+  svg.fx{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none;z-index:6;}
+  svg.fx .shape{stroke-width:8;stroke-linecap:round;fill:none;animation:fxsh .75s ease forwards;}
+  svg.fx .badge{font:800 14px -apple-system,system-ui,sans-serif;paint-order:stroke;
+    stroke:var(--panel);stroke-width:4px;animation:fxbd .75s ease forwards;}
+  @keyframes fxsh{0%{opacity:0}10%{opacity:.9}75%{opacity:.9}100%{opacity:0}}
+  @keyframes fxbd{0%{opacity:0}14%{opacity:1}80%{opacity:1}100%{opacity:0}}
+  .cell{aspect-ratio:1;border-radius:11px;background:var(--bg);
+    border:1px dashed var(--line);display:flex;align-items:center;justify-content:center;cursor:pointer;
+    transition:transform .1s ease, box-shadow .15s ease;}
+  .cell.target{border-style:solid;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent) inset;}
+  .cell.haspending{border-style:solid;border-color:var(--accent2);}
+  .cell.corner{border-color:var(--muted);}
+  .cell:active{transform:scale(.95);}
+  .cell.pop{animation:pop .4s ease;}
+  @keyframes pop{0%{transform:scale(1)}30%{transform:scale(1.18)}100%{transform:scale(.2);opacity:0}}
+
+  .die{width:84%;aspect-ratio:1;border-radius:10px;position:relative;
+    box-shadow:inset 0 -3px 0 rgba(0,0,0,.18), var(--shadow);}
+  .die i{position:absolute;width:19%;height:19%;border-radius:50%;background:#fff;
+    transform:translate(-50%,-50%);box-shadow:0 0 2px rgba(0,0,0,.25);}
+  .die.red{background:var(--die-red);} .die.green{background:var(--die-green);}
+  .die.blue{background:var(--die-blue);} .die.amber{background:var(--die-amber);}
+  .die.joker{background:var(--joker);position:relative;}
+  .die.joker::after{content:"★";position:absolute;inset:0;display:flex;align-items:center;
+    justify-content:center;color:#fff;font-size:150%;text-shadow:0 1px 3px rgba(0,0,0,.4);}
+  .die.pending::before{content:"";position:absolute;inset:3px;border-radius:7px;
+    border:2px dashed rgba(255,255,255,.9);}
+  .die.pending{animation:bob 1.6s ease-in-out infinite;}
+  .die.sel{outline:3px solid var(--accent);outline-offset:2px;}
+  @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-2px)}}
+
+  .controls{display:flex;align-items:center;gap:10px;margin-top:16px;flex-wrap:wrap;}
+  #tray{display:flex;gap:8px;min-height:56px;align-items:center;flex:1;}
+  .traydie{width:52px;height:52px;flex:0 0 auto;border-radius:10px;cursor:pointer;}
+  #rollBtn{font:inherit;font-weight:800;letter-spacing:.12em;padding:12px 20px;border-radius:12px;
+    border:none;background:var(--accent);color:#fff;cursor:pointer;box-shadow:var(--shadow);}
+  #rollBtn:disabled{opacity:.35;cursor:default;}
+  #jokerTray{display:flex;gap:6px;}
+  .jok{width:44px;height:44px;flex:0 0 auto;border-radius:9px;cursor:pointer;}
+  #jokerTray .empty{width:44px;height:44px;border-radius:9px;border:1px dashed var(--line);
+    display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:11px;}
+
+  #msg{min-height:20px;margin-top:12px;font-size:13px;color:var(--muted);text-align:center;}
+  #msg b{color:var(--accent);}
+
+  #rulesBtn{margin-top:18px;font:inherit;font-size:12px;background:none;border:1px solid var(--line);
+    color:var(--muted);padding:7px 14px;border-radius:20px;cursor:pointer;display:block;margin-left:auto;margin-right:auto;}
+  #rules{margin-top:14px;background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:14px 16px;font-size:12.5px;line-height:1.65;color:var(--ink);}
+  #rules h3{margin:14px 0 4px;font-size:12px;letter-spacing:.08em;color:var(--accent);text-transform:uppercase;}
+  #rules h3:first-child{margin-top:0;}
+  #rules table{width:100%;border-collapse:collapse;margin-top:4px;}
+  #rules td{padding:3px 0;border-bottom:1px solid var(--line);vertical-align:top;}
+  #rules td:last-child{text-align:right;white-space:nowrap;color:var(--muted);font-variant-numeric:tabular-nums;}
+  #rules .clear td:last-child{color:var(--accent);font-weight:700;}
+
+  #overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;z-index:10;}
+  #overlay[hidden]{display:none;}
+  #overlay .panel{background:var(--panel);border-radius:18px;padding:26px 30px;text-align:center;max-width:320px;box-shadow:0 20px 50px rgba(0,0,0,.4);}
+  #overlay h2{margin:0 0 6px;letter-spacing:.1em;}
+  #overlay .final{font-size:40px;font-weight:800;margin:10px 0 2px;font-variant-numeric:tabular-nums;}
+  #overlay .sub{font-size:12px;color:var(--muted);margin-bottom:6px;}
+  #overlay .newbest{color:var(--accent);font-weight:700;font-size:13px;margin-bottom:12px;}
+  #newGame{font:inherit;font-weight:800;letter-spacing:.12em;padding:12px 26px;border-radius:12px;
+    border:none;background:var(--accent);color:#fff;cursor:pointer;margin-top:10px;}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>LOCK <span>'N'</span> ROLL</h1>
+    <div class="scores">
+      <div>SCORE<b id="score">0</b></div>
+      <div>BEST<b id="best">0</b></div>
+    </div>
+    <button id="muteBtn" title="音のオン/オフ"><span class="ic">🔊</span><span class="lbl">音 ON</span></button>
+  </header>
+
+  <div class="meter"><div id="meterFill"></div></div>
+  <span id="meterLabel"></span>
+
+  <div id="board"></div>
+
+  <div class="controls">
+    <div id="tray"></div>
+    <button id="rollBtn">ROLL</button>
+  </div>
+  <div class="controls" style="margin-top:8px;">
+    <div id="jokerTray"></div>
+  </div>
+
+  <div id="msg">未確定ダイスをマスに置き、ROLL で確定。</div>
+
+  <button id="rulesBtn">ルール ▾</button>
+  <div id="rules" hidden></div>
+</div>
+
+<div id="overlay" hidden>
+  <div class="panel">
+    <h2>GAME OVER</h2>
+    <div class="sub" id="overReason"></div>
+    <div class="final" id="overScore">0</div>
+    <div class="sub">BEST <span id="overBest">0</span></div>
+    <div class="newbest" id="overNew" hidden>NEW BEST!</div>
+    <button id="newGame">NEW GAME</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const COLORS = ["red","green","blue","amber"];
+  const NUMS = [1,2,3,4];
+  const $ = s => document.querySelector(s);
+
+  // ---- persistent best ----
+  const store = {
+    get(){ try{ return parseInt(localStorage.getItem("lnr_best")||"0",10)||0; }catch(e){ return 0; } },
+    set(v){ try{ localStorage.setItem("lnr_best", String(v)); }catch(e){} }
+  };
+
+  // ---- audio: synthesized SFX + a tiny looping BGM (no audio files, all Web Audio) ----
+  const AudioSys = (() => {
+    let ctx = null, master = null, bgmGain = null, muted = false, bgmOn = false;
+    let bgmIdx = 0, bgmNext = 0, bgmTimer = null, kicked = false;
+    try{ muted = localStorage.getItem("lnr_mute") === "1"; }catch(e){}
+
+    function ensure(){
+      if(ctx) return ctx;
+      try{
+        ctx = new (window.AudioContext || window.webkitAudioContext)();
+        master = ctx.createGain();
+        master.gain.value = muted ? 0 : 0.5;
+        master.connect(ctx.destination);
+      }catch(e){ ctx = null; }
+      return ctx;
+    }
+
+    function tone(freq, o){
+      if(!ctx) return;
+      o = o || {};
+      const dur = o.dur ?? 0.15, type = o.type || "sine", gain = o.gain ?? 0.2, delay = o.delay || 0;
+      try{
+        const t0 = ctx.currentTime + delay;
+        const osc = ctx.createOscillator(), g = ctx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, t0);
+        if(o.slideTo) osc.frequency.exponentialRampToValueAtTime(o.slideTo, t0 + dur);
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.linearRampToValueAtTime(gain, t0 + 0.012);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        osc.connect(g); g.connect(master);
+        osc.start(t0); osc.stop(t0 + dur + 0.03);
+      }catch(e){}
+    }
+
+    const kit = {
+      place:    () => tone(520, {dur:.06, type:"triangle", gain:.16}),
+      pickup:   () => tone(340, {dur:.06, type:"triangle", gain:.13}),
+      confirm:  () => { tone(320,{dur:.08,type:"square",gain:.16}); tone(480,{dur:.1,type:"square",gain:.13,delay:.06}); },
+      roll:     () => { for(let i=0;i<5;i++) tone(200+Math.random()*280,{dur:.05,type:"square",gain:.07,delay:i*.03}); },
+      score:    () => tone(700,{dur:.13,type:"sine",gain:.2,slideTo:920}),
+      clear:    () => { tone(600,{dur:.15,type:"sawtooth",gain:.18,slideTo:1250}); tone(950,{dur:.18,type:"sine",gain:.14,delay:.05}); },
+      bigclear: () => [0,1,2,3].forEach(i => tone(500+i*170,{dur:.22,type:"square",gain:.18,delay:i*.08})),
+      joker:    () => [660,880,1108].forEach((f,i) => tone(f,{dur:.18,type:"sine",gain:.2,delay:i*.09})),
+      gameover: () => [420,340,280,220].forEach((f,i) => tone(f,{dur:.32,type:"sawtooth",gain:.18,delay:i*.17})),
+      newbest:  () => [523,659,784,1047].forEach((f,i) => tone(f,{dur:.2,type:"triangle",gain:.2,delay:i*.1}))
+    };
+
+    function play(name){
+      if(muted) return;
+      ensure();
+      if(!ctx) return;
+      if(ctx.state === "suspended") ctx.resume().catch(()=>{});
+      try{ kit[name] && kit[name](); }catch(e){}
+    }
+
+    // gentle 16-step looping arpeggio, kept very quiet
+    const BGM_NOTES = [261.6,329.6,392.0,329.6, 349.2,440.0,523.3,440.0,
+                        293.7,392.0,466.2,392.0, 349.2,440.0,523.3,392.0];
+    function bgmTick(){
+      if(!bgmOn || !ctx) return;
+      while(bgmNext < ctx.currentTime + 0.25){
+        const f = BGM_NOTES[bgmIdx % BGM_NOTES.length];
+        const t0 = bgmNext;
+        try{
+          const osc = ctx.createOscillator(), g = ctx.createGain();
+          osc.type = "sine"; osc.frequency.setValueAtTime(f, t0);
+          g.gain.setValueAtTime(0.0001, t0);
+          g.gain.linearRampToValueAtTime(0.05, t0 + 0.03);
+          g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.36);
+          osc.connect(g); g.connect(bgmGain);
+          osc.start(t0); osc.stop(t0 + 0.4);
+        }catch(e){}
+        bgmIdx++;
+        bgmNext += 0.4;
+      }
+      bgmTimer = setTimeout(bgmTick, 120);
+    }
+    function startBgm(){
+      if(!ctx || bgmOn) return;
+      if(!bgmGain){ bgmGain = ctx.createGain(); bgmGain.gain.value = 1; bgmGain.connect(master); }
+      bgmOn = true; bgmIdx = 0; bgmNext = ctx.currentTime + 0.1;
+      bgmTick();
+    }
+
+    function setMuted(m){
+      muted = m;
+      try{ localStorage.setItem("lnr_mute", m ? "1" : "0"); }catch(e){}
+      if(master) master.gain.value = m ? 0 : 0.5;
+    }
+    function kickoff(){                 // call only from inside a real user-gesture handler
+      if(kicked) return;
+      kicked = true;
+      ensure();
+      if(ctx && ctx.state === "suspended") ctx.resume().catch(()=>{});
+      startBgm();
+    }
+    return {
+      play, kickoff,
+      toggleMute(){ setMuted(!muted); return muted; },
+      isMuted(){ return muted; }
+    };
+  })();
+
+  // ---- scoring groups on the 4x4 grid ----
+  const GROUPS = (() => {
+    const g = [];
+    for(let r=0;r<4;r++) g.push([[r,0],[r,1],[r,2],[r,3]]);          // rows
+    for(let c=0;c<4;c++) g.push([[0,c],[1,c],[2,c],[3,c]]);          // cols
+    g.push([[0,0],[1,1],[2,2],[3,3]]);                              // diagonal
+    g.push([[0,3],[1,2],[2,1],[3,0]]);                              // anti-diagonal
+    g.push([[0,0],[0,3],[3,0],[3,3]]);                              // four corners
+    for(let r=0;r<3;r++) for(let c=0;c<3;c++)                       // 2x2 quads
+      g.push([[r,c],[r,c+1],[r+1,c],[r+1,c+1]]);
+    return g;
+  })();
+  const CORNERS = new Set(["0,0","0,3","3,0","3,3"]);
+  const CELL_GROUPS = {};
+  GROUPS.forEach((cells,gi) => cells.forEach(([r,c]) => {
+    (CELL_GROUPS[r+","+c] = CELL_GROUPS[r+","+c] || []).push(gi);
+  }));
+
+  const ALL_TYPES = [];
+  for(const c of COLORS) for(const n of NUMS) ALL_TYPES.push({color:c,number:n});
+
+  // ---- state ----
+  // board[r][c] : confirmed die {color,number} | {joker:true} | null
+  // pending[]   : tentative items, committed only on ROLL:
+  //   {kind:"die", color, number, r, c, ord}   r===null => in the tray
+  //   {kind:"joker", r, c, ord}                always on the board (taken from hand)
+  let board, pending, ordCtr, score, meter, nextJoker, jokers, sel, jokerSel, gameOver, newBest;
+  let flashCells = [];
+  let revealing = false;   // true while the sequential score reveal is animating
+
+  const rnd = n => Math.floor(Math.random()*n);
+  const randDie = () => ({kind:"die", color:COLORS[rnd(4)], number:NUMS[rnd(4)], r:null, c:null, ord:0});
+  const setMsg = html => { $("#msg").innerHTML = html; };
+
+  function reset(){
+    board = Array.from({length:4}, () => Array(4).fill(null));
+    pending = [randDie(), randDie(), randDie(), randDie()];
+    ordCtr = 0;
+    score = 0; meter = 0; nextJoker = 250; jokers = 0;
+    sel = 0; jokerSel = false; gameOver = false; newBest = false;
+    $("#overlay").hidden = true;
+    setMsg("未確定ダイスをマスに置き、<b>ROLL</b> で確定。");
+    render();
+  }
+
+  const pendingAt = (r,c) => pending.find(p => p.r === r && p.c === c);
+  const firstTrayDie = () => { const i = pending.findIndex(p => p.kind === "die" && p.r === null); return i < 0 ? null : i; };
+  const trayDice = () => pending.filter(p => p.kind === "die" && p.r === null);
+  const placedItems = () => pending.filter(p => p.r !== null);
+  function openCells(){
+    let n = 0;
+    for(let r=0;r<4;r++) for(let c=0;c<4;c++)
+      if(board[r][c] === null && !pendingAt(r,c)) n++;
+    return n;
+  }
+
+  // ---- combo evaluation ----
+  // ds: exactly 4 concrete dice {color,number}
+  function comboScore(ds){
+    const cU = new Set(ds.map(d=>d.color)).size;
+    const nU = new Set(ds.map(d=>d.number)).size;
+    if(cU===1 && nU===1) return {pts:200, clear:true, name:"同色・同数字"};
+    if(cU===1 && nU===4) return {pts:150, clear:true, name:"同色ストレート"};
+    if(cU===4 && nU===1) return {pts:150, clear:true, name:"虹色・同数字"};
+    if(cU===4 && nU===4) return {pts:100, clear:true, name:"虹色ストレート"};
+    const rank = arr => Object.values(arr.reduce((m,v)=>(m[v]=(m[v]||0)+1,m),{})).sort((a,b)=>b-a);
+    const nr = rank(ds.map(d=>d.number));
+    const cr = rank(ds.map(d=>d.color));
+    let pts = 0; const nm = [];
+    if(nU===4){ pts += 40; nm.push("ストレート"); }
+    if(nr[0]===4){ pts += 80; nm.push("数字4個"); }
+    else if(nr[0]===3){ pts += 30; nm.push("スリーカード"); }
+    else if(nr[0]===2 && nr[1]===2){ pts += 20; nm.push("ツーペア"); }
+    else if(nr[0]===2){ pts += 10; nm.push("ペア"); }
+    if(cr[0]===4){ pts += 70; nm.push("同色4個"); }
+    else if(cr[0]===3){ pts += 25; nm.push("同色3個"); }
+    else if(cr[0]===2 && cr[1]===2){ pts += 15; nm.push("同色2ペア"); }
+    else if(cr[0]===2){ pts += 5; nm.push("同色ペア"); }
+    return {pts, clear:false, name: nm.join("+") || "—"};
+  }
+
+  // dice: 4 cell contents (may include {joker:true})
+  function evalGroup(dice){
+    const jok = dice.filter(d => d.joker).length;
+    const real = dice.filter(d => !d.joker);
+    if(real.length === 0) return {pts:0, clear:false, name:"—"};
+    let best = {pts:0, clear:false, name:"—"};
+    const pick = combo => {
+      if(combo.pts > best.pts || (combo.pts === best.pts && combo.clear && !best.clear)) best = combo;
+    };
+    if(jok === 0){
+      pick(comboScore(real));
+    } else if(jok === 1){
+      for(const t of ALL_TYPES) pick(comboScore(real.concat([t])));
+    } else {
+      for(const a of ALL_TYPES) for(const b of ALL_TYPES){
+        const extra = [a,b];
+        for(let k=2;k<jok;k++) extra.push(a);
+        pick(comboScore(real.concat(extra)));
+      }
+    }
+    return {
+      pts: Math.floor(best.pts * Math.pow(0.75, jok)),
+      clear: best.clear,
+      name: best.name + (jok ? ` (J×${jok})` : "")
+    };
+  }
+
+  // Joker thresholds: 250,500,750,1000,1250,1500, then every 1500 (3000,4500,…).
+  function addScore(p){
+    if(p<=0) return;
+    score += p; meter += p;
+    while(meter >= nextJoker){
+      if(jokers < 2){ jokers++; AudioSys.play("joker"); }
+      else score += 1000;            // already holding 2 jokers => convert to points
+      nextJoker += (nextJoker < 1500) ? 250 : 1500;
+    }
+    const el = $("#score");
+    el.classList.remove("bump"); void el.offsetWidth; el.classList.add("bump");
+  }
+
+  const groupLabel = gi => {
+    if(gi < 4) return "行" + (gi + 1);
+    if(gi < 8) return "列" + (gi - 3);
+    if(gi === 8) return "対角＼";
+    if(gi === 9) return "対角／";
+    if(gi === 10) return "四隅";
+    const q = gi - 11;
+    return `2×2(${Math.floor(q/3)+1},${q%3+1})`;
+  };
+
+  // Detect every group that just became full (4 dice) and contains a cell confirmed this turn.
+  // Pure: does NOT touch board/score — the reveal step applies each hit one at a time.
+  function detectHits(newCells){
+    const fresh = new Set(newCells.map(([r,c]) => r + "," + c));
+    const hits = [];
+    GROUPS.forEach((cells, gi) => {
+      const contents = cells.map(([r,c]) => board[r][c]);
+      if(contents.some(x => x === null)) return;                       // not full
+      if(!cells.some(([r,c]) => fresh.has(r + "," + c))) return;       // nothing new here
+      const res = evalGroup(contents);
+      if(res.pts <= 0 && !res.clear) return;
+      hits.push({gi, name: res.name, pts: res.pts, clear: res.clear, cells});
+    });
+    return hits;
+  }
+
+  // ---- actions ----
+  function roll(){
+    if(gameOver || revealing) return;
+    const commit = placedItems().sort((a,b) => a.ord - b.ord);
+    if(commit.length === 0) return;                       // nothing placed => nothing to confirm
+    AudioSys.kickoff();
+    const newCells = [];
+    for(const p of commit){
+      board[p.r][p.c] = p.kind === "joker" ? {joker:true} : {color:p.color, number:p.number};
+      newCells.push([p.r, p.c]);
+    }
+    pending = trayDice();                                 // keep only unplaced tray dice
+    const refilled = pending.length === 0;
+    if(refilled) while(pending.length < 4) pending.push(randDie());   // refill ONLY when the tray is empty
+    sel = firstTrayDie();
+    jokerSel = false;
+    AudioSys.play("confirm");
+    if(refilled) AudioSys.play("roll");
+    render();
+    playReveal(detectHits(newCells));
+  }
+
+  // Reveal each scored group one at a time (score, clear, FX, sound), then settle the turn.
+  // Non-clearing hits play first; clearing hits (which remove dice) are held back to the end.
+  function playReveal(hits){
+    if(!hits.length){
+      setMsg("役なし　<b>+0</b>");
+      finishTurn();
+      return;
+    }
+    revealing = true;
+    render();
+    const ordered = hits.filter(h => !h.clear).concat(hits.filter(h => h.clear));
+    const toClearAll = new Set();
+    hits.forEach(h => { if(h.clear) h.cells.forEach(([r,c]) => toClearAll.add(r + "," + c)); });
+    const bonus = toClearAll.size >= 5 ? 50 * (toClearAll.size - 4) : 0;   // 5th+ cleared die: +50 each
+    const STEP = 820;
+    const lines = [];
+    let total = 0, i = 0, bonusDone = false;
+
+    function step(){
+      if(i < ordered.length){
+        const h = ordered[i++];
+        addScore(h.pts);
+        total += h.pts;
+        if(h.clear){
+          h.cells.forEach(([r,c]) => { board[r][c] = null; flashCells.push(r + "," + c); });
+          AudioSys.play("clear");
+        } else {
+          AudioSys.play("score");
+        }
+        lines.push(`${groupLabel(h.gi)}・${h.name} ${h.clear ? "★" : ""}+${h.pts}`);
+        setMsg(lines.join("<br>"));
+        render();
+        showFxStep(h);
+        setTimeout(step, STEP);
+      } else if(bonus > 0 && !bonusDone){
+        bonusDone = true;
+        addScore(bonus);
+        total += bonus;
+        lines.push(`<b>${toClearAll.size}個クリア +${bonus}</b>`);
+        setMsg(lines.join("<br>"));
+        AudioSys.play("bigclear");
+        render();
+        setTimeout(step, STEP);
+      } else {
+        setMsg(lines.join("<br>") + `<br><b>計 +${total.toLocaleString()}</b>`);
+        revealing = false;
+        render();
+        finishTurn();
+      }
+    }
+    step();
+  }
+
+  function finishTurn(){
+    if(jokers === 0 && openCells() === 0) end("置き場所がありません");
+  }
+
+  function tapCell(r,c){
+    if(gameOver || revealing) return;
+    AudioSys.kickoff();
+    const p = pendingAt(r,c);
+
+    if(jokerSel){                                         // place a fresh joker from hand
+      if(jokers > 0 && !p){
+        pending.push({kind:"joker", r, c, ord:++ordCtr});
+        jokers--;
+        AudioSys.play("place");
+      }
+      jokerSel = false;
+      sel = firstTrayDie();
+      render();
+      return;
+    }
+
+    if(p){                                               // tapped a tentative item
+      const i = pending.indexOf(p);
+      if(sel === i){                                      // second tap => pick it up
+        if(p.kind === "joker"){ jokers++; pending.splice(i,1); sel = firstTrayDie(); }
+        else { p.r = p.c = null; sel = i; }
+        AudioSys.play("pickup");
+      } else {
+        sel = i;
+      }
+      render();
+      return;
+    }
+
+    // empty or confirmed cell, nothing tentative here
+    if(sel === null || !pending[sel]) return;
+    const it = pending[sel];
+    if(it.kind === "die" && board[r][c] !== null) return; // a die can't cover a locked die (joker can)
+    it.r = r; it.c = c; it.ord = ++ordCtr;
+    sel = firstTrayDie();                                 // placed items start unselected
+    AudioSys.play("place");
+    render();
+  }
+
+  // ---- scoring FX overlay (shows which of the 20 areas scored) ----
+  const SVGNS = "http://www.w3.org/2000/svg";
+  const cssVar = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim() || "#c2410c";
+  function showFxStep(h){
+    const bd = $("#board");
+    bd.querySelectorAll("svg.fx").forEach(s => s.remove());
+    const cells = bd.querySelectorAll(".cell");
+    if(cells.length < 16) return;
+    const ctr = (r,c) => { const e = cells[r*4+c]; return [e.offsetLeft + e.offsetWidth/2, e.offsetTop + e.offsetHeight/2]; };
+    const rectOf = (r,c) => { const e = cells[r*4+c]; return [e.offsetLeft, e.offsetTop, e.offsetWidth, e.offsetHeight]; };
+    const svg = document.createElementNS(SVGNS, "svg");
+    svg.setAttribute("class", "fx");
+    svg.setAttribute("viewBox", `0 0 ${bd.clientWidth} ${bd.clientHeight}`);
+    const mk = (tag, attrs) => { const n = document.createElementNS(SVGNS, tag); for(const k in attrs) n.setAttribute(k, attrs[k]); return n; };
+
+    const stroke = h.clear ? cssVar("--accent") : cssVar("--accent2");
+    const g = mk("g", {});
+    let bx, by;
+    if(h.gi < 4){ const a = ctr(h.gi,0), b = ctr(h.gi,3);
+      g.appendChild(mk("line", {x1:a[0],y1:a[1],x2:b[0],y2:b[1],class:"shape",stroke})); bx=(a[0]+b[0])/2; by=a[1]; }
+    else if(h.gi < 8){ const c=h.gi-4, a=ctr(0,c), b=ctr(3,c);
+      g.appendChild(mk("line", {x1:a[0],y1:a[1],x2:b[0],y2:b[1],class:"shape",stroke})); bx=a[0]; by=(a[1]+b[1])/2; }
+    else if(h.gi === 8){ const a=ctr(0,0), b=ctr(3,3);
+      g.appendChild(mk("line", {x1:a[0],y1:a[1],x2:b[0],y2:b[1],class:"shape",stroke})); bx=(a[0]+b[0])/2; by=(a[1]+b[1])/2; }
+    else if(h.gi === 9){ const a=ctr(0,3), b=ctr(3,0);
+      g.appendChild(mk("line", {x1:a[0],y1:a[1],x2:b[0],y2:b[1],class:"shape",stroke})); bx=(a[0]+b[0])/2; by=(a[1]+b[1])/2; }
+    else if(h.gi === 10){
+      [[0,0],[0,3],[3,0],[3,3]].forEach(([r,c]) => { const p = ctr(r,c);
+        g.appendChild(mk("circle", {cx:p[0],cy:p[1],r:16,class:"shape",stroke})); });
+      bx = bd.clientWidth/2; by = bd.clientHeight/2;
+    } else {
+      const q = h.gi - 11, qr = Math.floor(q/3), qc = q%3;
+      const tl = rectOf(qr,qc), br = rectOf(qr+1,qc+1);
+      const x = tl[0], y = tl[1], w = br[0]+br[2]-tl[0], hh = br[1]+br[3]-tl[1];
+      g.appendChild(mk("rect", {x,y,width:w,height:hh,rx:12,class:"shape",stroke}));
+      bx = x + w/2; by = y + hh/2;
+    }
+    g.appendChild(mk("text", {x:bx, y:by, class:"badge", fill:stroke,
+      "text-anchor":"middle", "dominant-baseline":"middle"})).textContent = "+" + h.pts;
+    svg.appendChild(g);
+    bd.appendChild(svg);
+    setTimeout(() => svg.remove(), 800);
+  }
+
+  function end(reason){
+    gameOver = true;
+    const best = store.get();
+    if(score > best){ store.set(score); newBest = true; }
+    AudioSys.play(newBest ? "newbest" : "gameover");
+    $("#overReason").textContent = reason;
+    $("#overScore").textContent = score.toLocaleString();
+    $("#overBest").textContent = Math.max(score,best).toLocaleString();
+    $("#overNew").hidden = !newBest;
+    $("#overlay").hidden = false;
+    render();
+  }
+
+  // ---- rendering ----
+  const PIPS = {1:[4], 2:[0,8], 3:[0,4,8], 4:[0,2,6,8]};
+  function dieEl(d, cls){
+    const el = document.createElement("div");
+    el.className = "die " + (d.joker ? "joker" : d.color) + (cls?(" "+cls):"");
+    if(!d.joker){
+      for(const i of PIPS[d.number]){
+        const p = document.createElement("i");
+        p.style.left = (25 + (i%3)*25) + "%";
+        p.style.top  = (25 + Math.floor(i/3)*25) + "%";
+        el.appendChild(p);
+      }
+    }
+    return el;
+  }
+
+  function render(){
+    $("#score").textContent = score.toLocaleString();
+    $("#best").textContent = Math.max(score, store.get()).toLocaleString();
+
+    const band = nextJoker <= 1500 ? 250 : 1500;
+    const prev = nextJoker - band;
+    const pct = Math.max(0, Math.min(1, (meter - prev) / band)) * 100;
+    $("#meterFill").style.width = pct + "%";
+    $("#meterLabel").textContent = `NEXT JOKER  ${meter - prev} / ${band}`;
+
+    const selItem = (sel !== null && !jokerSel) ? pending[sel] : null;
+
+    const bd = $("#board");
+    bd.innerHTML = "";
+    for(let r=0;r<4;r++) for(let c=0;c<4;c++){
+      const cell = document.createElement("div");
+      cell.className = "cell" + (CORNERS.has(r+","+c) ? " corner" : "");
+      const conf = board[r][c];
+      const p = pendingAt(r,c);
+      if(!gameOver){
+        if(jokerSel && jokers > 0){ if(!p) cell.classList.add("target"); }
+        else if(selItem){
+          if(selItem.kind === "joker"){ if(!p || p === selItem) cell.classList.add("target"); }
+          else if((!conf && !p) || p === selItem) cell.classList.add("target");
+        }
+      }
+      const shown = p || conf;
+      if(shown){
+        const face = shown.kind === "joker" || shown.joker ? {joker:true} : shown;
+        cell.appendChild(dieEl(face, p ? ("pending" + (p === selItem ? " sel" : "")) : null));
+      }
+      if(p) cell.classList.add("haspending");
+      if(flashCells.includes(r+","+c)) cell.classList.add("pop");
+      cell.onclick = () => tapCell(r,c);
+      bd.appendChild(cell);
+    }
+    flashCells = [];
+
+    const tray = $("#tray");
+    tray.innerHTML = "";
+    pending.forEach((d,i) => {
+      if(d.kind !== "die" || d.r !== null) return;
+      const t = dieEl(d, "traydie" + (i === sel && !jokerSel ? " sel" : ""));
+      t.onclick = () => { sel = i; jokerSel = false; render(); };
+      tray.appendChild(t);
+    });
+    const anyPlaced = placedItems().length > 0;
+    const hint = document.createElement("span");
+    hint.style.cssText = "font-size:11px;color:var(--muted);align-self:center;";
+    hint.textContent = gameOver ? "" : anyPlaced ? "→ ROLL で確定" : "ダイスをマスへ";
+    tray.appendChild(hint);
+
+    const jt = $("#jokerTray");
+    jt.innerHTML = "";
+    const pj = pending.filter(p => p.kind === "joker").length;
+    for(let i=0;i<2;i++){
+      if(i < jokers){
+        const j = dieEl({joker:true}, "jok" + (jokerSel ? " sel" : ""));
+        j.onclick = () => { jokerSel = !jokerSel; render(); };
+        jt.appendChild(j);
+      } else {
+        const e = document.createElement("div");
+        e.className = "empty"; e.textContent = i < jokers + pj ? "◦" : "J";
+        jt.appendChild(e);
+      }
+    }
+    const jl = document.createElement("span");
+    jl.style.cssText = "font-size:11px;color:var(--muted);align-self:center;";
+    jl.textContent = jokerSel ? "置くマスをタップ（確定ダイスの上も可）"
+      : jokers > 0 ? "ジョーカー：仮置き→ROLLで確定・役75%・持つ間はGAME OVERなし"
+      : pj ? "ジョーカー仮置き中：タップで移動／持ち直し"
+      : "ジョーカー：メーター満タン（250点毎）で獲得";
+    jt.appendChild(jl);
+
+    $("#rollBtn").disabled = gameOver || revealing || !anyPlaced;
+  }
+
+  // ---- rules panel ----
+  $("#rules").innerHTML = `
+    <h3>目的</h3>
+    4×4の盤に色つきダイスを置き、<b>4個ひと組</b>の役を作る。行・列・対角線・四隅・2×2の各ブロックが判定対象。ジョーカーを持たずに全マスが埋まると終了、スコアを競う。
+    <h3>手番</h3>
+    未確定ダイス（最大4個）とジョーカーを、盤に自由に置く・動かす・戻す。<b>ROLL</b>で盤上のものを一括確定し、<b>今回の確定で4マスすべて埋まった組だけ</b>を採点・クリア判定する。得点した組は<b>1つずつ順番に</b>盤上へ線・枠・+点で表示され、最後にクリア個数ボーナスと合計が出る（この間は次の操作待ち）。<br>
+    トレイにダイスが残っていれば<b>補充なし</b>。使い切ったときだけ4個補充。ダイスを置いていない状態ではROLL不可。右上のボタンで効果音・BGMのオン/オフを切り替え可能。
+    <h3>判定される20の組</h3>
+    行4・列4・対角2・四隅・2×2ブロック9。
+    <h3>クリアする役（4個が消える）</h3>
+    <table>
+      <tr class="clear"><td>同じ色 ＋ 同じ数字</td><td>200</td></tr>
+      <tr class="clear"><td>同じ色 ＋ 数字4種（1-4）</td><td>150</td></tr>
+      <tr class="clear"><td>色4種 ＋ 同じ数字</td><td>150</td></tr>
+      <tr class="clear"><td>色4種 ＋ 数字4種</td><td>100</td></tr>
+    </table>
+    1回のROLLで<b>5個以上</b>のダイスを消すと、5個目以降1個につき +50 ボーナス（例：7個消えたら (7-4)×50＝150）。
+    <h3>加点のみの役（4個そろった組）</h3>
+    <table>
+      <tr><td>同じ数字4個</td><td>80</td></tr>
+      <tr><td>同じ色4個</td><td>70</td></tr>
+      <tr><td>ストレート（数字4種）</td><td>+40</td></tr>
+      <tr><td>スリーカード（数字3個）</td><td>30</td></tr>
+      <tr><td>同色3個</td><td>25</td></tr>
+      <tr><td>ツーペア（数字2+2）</td><td>20</td></tr>
+      <tr><td>同色2ペア</td><td>15</td></tr>
+      <tr><td>ペア（数字2個）</td><td>10</td></tr>
+      <tr><td>同色ペア</td><td>5</td></tr>
+    </table>
+    色の役と数字の役は加算される（例：ストレート＋同色ペア＝45）。
+    <h3>ジョーカー</h3>
+    累計スコアが 250 / 500 / 750 / 1,000 / 1,250 / 1,500 点、それ以降は<b>1,500点ごと</b>（3,000 / 4,500 …）に到達するたび1枚獲得。最大2枚保持でき、<b>すでに2枚持っている</b>ときに到達すると代わりに1,000点。盤に<b>仮置き</b>でき自由に動かせ、<b>ROLLで確定</b>する。空マスにも確定ダイスの上にも置ける。どのダイスの代わりにもなり組の役を最大化。ジョーカーを含む役は75%（2枚56%）。<b>ジョーカーを持っている間はGAME OVERにならない。</b>
+  `;
+  $("#rulesBtn").onclick = () => {
+    const el = $("#rules");
+    el.hidden = !el.hidden;
+    $("#rulesBtn").textContent = el.hidden ? "ルール ▾" : "ルール ▴";
+  };
+
+  $("#rollBtn").onclick = roll;
+  $("#newGame").onclick = () => { AudioSys.kickoff(); reset(); };
+  function syncMuteBtn(){
+    const m = AudioSys.isMuted();
+    $("#muteBtn .ic").textContent = m ? "🔇" : "🔊";
+    $("#muteBtn .lbl").textContent = m ? "音 OFF" : "音 ON";
+  }
+  $("#muteBtn").onclick = () => { AudioSys.kickoff(); AudioSys.toggleMute(); syncMuteBtn(); };
+  syncMuteBtn();
+  window.addEventListener("keydown", e => {
+    if(revealing) return;
+    AudioSys.kickoff();
+    if(e.key === " " || e.key === "Enter"){
+      e.preventDefault();
+      if(gameOver) reset(); else roll();
+    } else if(e.key === "r" || e.key === "R"){ roll(); }
+    else if("1234".includes(e.key)){
+      const trayIdxs = pending.map((p,i) => (p.kind === "die" && p.r === null) ? i : -1).filter(i => i >= 0);
+      const k = +e.key - 1;
+      if(k < trayIdxs.length){ sel = trayIdxs[k]; jokerSel = false; render(); }
+    } else if(e.key === "j" || e.key === "J"){
+      if(jokers > 0){ jokerSel = !jokerSel; render(); }
+    }
+  });
+
+  reset();
+
+  // debug hook for headless verification (see CLAUDE.md testing convention)
+  window.__lnr = {
+    comboScore, evalGroup, detectHits, groupLabel, AudioSys, addScore,
+    state: () => ({board, pending, score, meter, nextJoker, jokers, sel, jokerSel, gameOver, revealing}),
+    roll, tapCell,
+    selectJoker: () => { jokerSel = true; },
+    setup: (b, pend, jk) => {
+      board = b; pending = pend || []; jokers = jk || 0;
+      meter = 0; nextJoker = 250; score = 0; ordCtr = 100;
+      sel = firstTrayDie(); jokerSel = false; gameOver = false; revealing = false; render();
+    }
+  };
+})();
+</script>
+</body>
+</html>
