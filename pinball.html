@@ -1,0 +1,1585 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>ピンボール</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: radial-gradient(circle at 50% 20%, #2b2b3d 0%, #0e0e16 70%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Segoe UI", "Hiragino Sans", sans-serif;
+    color: #eee;
+    overflow: hidden;
+    /* phones: no scroll / pinch-zoom / double-tap zoom / long-press text selection */
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  :root {
+    /* board display width: 349px on desktop, shrunk to fit narrow/short phone screens */
+    --cw: min(349px, 96vw, calc((100vh - 44px) * 0.6177));
+  }
+  @supports (height: 100dvh) {
+    :root { --cw: min(349px, 96vw, calc((100dvh - 44px) * 0.6177)); }
+  }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+  }
+  #hud {
+    display: flex;
+    justify-content: space-between;
+    width: var(--cw);
+    font-size: 13px;
+    line-height: 1.1;
+    letter-spacing: 0.5px;
+    text-shadow: 0 0 6px #6cf;
+  }
+  #hud span { color: #7fd8ff; font-weight: bold; }
+  #multInfo {
+    width: var(--cw);
+    text-align: center;
+    font-size: 11px;
+    line-height: 1.1;
+    color: #7fd8ff;
+    text-shadow: 0 0 6px #6cf;
+    min-height: 12px;
+    letter-spacing: 0.5px;
+  }
+  canvas {
+    background: #0a0a12;
+    border-radius: 14px;
+    box-shadow: 0 0 0 6px #333 inset, 0 0 40px rgba(80,150,255,0.35), 0 10px 30px rgba(0,0,0,0.6);
+    width: var(--cw);
+    height: calc(var(--cw) * 1.619);
+  }
+  #msg {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    background: rgba(0,0,0,0.75);
+    padding: 20px 28px;
+    border-radius: 12px;
+    display: block;
+    font-size: 18px;
+    border: 1px solid #5cf;
+    width: max-content;
+    white-space: nowrap;
+  }
+  #msgScore { margin-top: 8px; font-size: 15px; color: #7fd8ff; }
+  #msg button {
+    margin-top: 14px;
+    padding: 8px 20px;
+    font-size: 16px;
+    border-radius: 8px;
+    border: none;
+    background: #5cf;
+    color: #012;
+    cursor: pointer;
+    font-weight: bold;
+  }
+  #msgHelp {
+    margin-top: 14px;
+    font-size: 11px;
+    color: #99a;
+    line-height: 1.6;
+  }
+  #stage { position: relative; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div>SCORE: <span id="score">0</span></div>
+    <div>BALL: <span id="balls">3</span></div>
+    <div>HIGH: <span id="high">0</span></div>
+  </div>
+  <div id="multInfo"></div>
+  <div id="stage">
+    <canvas id="game" width="420" height="680"></canvas>
+    <div id="msg">
+      <div id="msgText">GAME START</div>
+      <div id="msgScore">スコア: <span id="msgScoreVal">0</span></div>
+      <button id="restartBtn">プレイ</button>
+      <div id="msgHelp">フリッパー：<br>A・L／←・→<br>ボール発射：<br>Space<br>サウンド切替：M<br><br>スマホ：左右タッチでフリッパー<br>右端レーン長押し→離して発射<br>スコア欄タップで音切替</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  const scoreEl = document.getElementById('score');
+  const ballsEl = document.getElementById('balls');
+  const highEl = document.getElementById('high');
+  const multInfoEl = document.getElementById('multInfo');
+  const msgEl = document.getElementById('msg');
+  const msgText = document.getElementById('msgText');
+  const msgScoreVal = document.getElementById('msgScoreVal');
+  const restartBtn = document.getElementById('restartBtn');
+
+  let high = Number(localStorage.getItem('pinballHigh') || 0);
+  highEl.textContent = high;
+
+  // ---------- audio: everything synthesised with the Web Audio API, no asset files ----------
+  // context is created lazily on the first user gesture (browsers block audio before that). BGM
+  // is a slow procedural bass+arp loop; SFX are one-shot blips. `M` mutes (persisted).
+  const AudioSys = (() => {
+    let ac, master, musicGain, sfxGain, bgmTimer = null, step = 0;
+    let muted = false;
+    try { muted = localStorage.getItem('pinballMute') === '1'; } catch (e) {}
+    const bassSeq = [110, 0, 82.41, 0, 98, 0, 110, 130.81];
+    const arpSeq = [440, 523.25, 659.25, 523.25, 587.33, 493.88, 659.25, 783.99];
+
+    function tone(freq, at, dur, dest, type, g, sweepTo) {
+      if (!freq) return;
+      const o = ac.createOscillator(), ga = ac.createGain();
+      o.type = type || 'sine';
+      o.frequency.setValueAtTime(freq, at);
+      if (sweepTo) o.frequency.exponentialRampToValueAtTime(sweepTo, at + dur);
+      ga.gain.setValueAtTime(0.0001, at);
+      ga.gain.linearRampToValueAtTime(g, at + 0.01);
+      ga.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+      o.connect(ga); ga.connect(dest);
+      o.start(at); o.stop(at + dur + 0.03);
+    }
+    function noiseBurst(at, dur, dest, g, freq, q) {
+      const len = Math.max(1, Math.floor(ac.sampleRate * dur));
+      const buf = ac.createBuffer(1, len, ac.sampleRate), d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      const src = ac.createBufferSource(); src.buffer = buf;
+      const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = freq || 1200; bp.Q.value = q || 1;
+      const ga = ac.createGain();
+      ga.gain.setValueAtTime(g, at);
+      ga.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+      src.connect(bp); bp.connect(ga); ga.connect(dest);
+      src.start(at); src.stop(at + dur);
+    }
+    function bgmTick() {
+      try {
+        if (!ac) return;
+        const t = ac.currentTime + 0.06, sp = 0.3;
+        tone(bassSeq[step % bassSeq.length], t, sp * 0.95, musicGain, 'triangle', 0.5);
+        if (step % 2 === 0) tone(arpSeq[(step / 2) % arpSeq.length] * 2, t, sp * 0.55, musicGain, 'sine', 0.09);
+        step++;
+      } catch (e) {}
+    }
+    const kit = {
+      bumper: () => tone(210, ac.currentTime, 0.12, sfxGain, 'square', 0.28, 95),
+      sling: () => noiseBurst(ac.currentTime, 0.07, sfxGain, 0.25, 2600, 2),
+      flipper: () => tone(130, ac.currentTime, 0.05, sfxGain, 'square', 0.18, 72),
+      drop: () => tone(320, ac.currentTime, 0.11, sfxGain, 'square', 0.26, 500),
+      lamp: () => tone(880, ac.currentTime, 0.09, sfxGain, 'sine', 0.2, 1330),
+      lane: () => tone(620, ac.currentTime, 0.07, sfxGain, 'triangle', 0.18, 780),
+      launch: () => noiseBurst(ac.currentTime, 0.28, sfxGain, 0.3, 480, 0.6),
+      kickback: () => tone(170, ac.currentTime, 0.2, sfxGain, 'sawtooth', 0.28, 720),
+      uppost: () => tone(160, ac.currentTime, 0.05, sfxGain, 'square', 0.22),
+      lock: () => { const t = ac.currentTime; tone(440, t, 0.1, sfxGain, 'square', 0.28); tone(660, t + 0.09, 0.16, sfxGain, 'square', 0.28); },
+      bank: () => { const t = ac.currentTime; [523.25, 659.25, 783.99].forEach((f, i) => tone(f, t + i * 0.06, 0.26, sfxGain, 'triangle', 0.22)); },
+      multiplier: () => { const t = ac.currentTime; [784, 988, 1319].forEach((f, i) => tone(f, t + i * 0.04, 0.2, sfxGain, 'sine', 0.18)); },
+      multiball: () => { const t = ac.currentTime; [392, 523.25, 659.25, 880, 1174.7].forEach((f, i) => tone(f, t + i * 0.09, 0.45, sfxGain, 'sawtooth', 0.2)); },
+      drain: () => tone(320, ac.currentTime, 0.4, sfxGain, 'sawtooth', 0.26, 70),
+    };
+    function applyMute() {
+      if (!ac) return;
+      musicGain.gain.value = muted ? 0 : 0.16;
+      sfxGain.gain.value = muted ? 0 : 0.5;
+    }
+    return {
+      init() {
+        if (ac) { this.resume(); return; }
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        try {
+          ac = new AC();
+          master = ac.createGain(); master.gain.value = 0.85; master.connect(ac.destination);
+          musicGain = ac.createGain(); musicGain.connect(master);
+          sfxGain = ac.createGain(); sfxGain.connect(master);
+          applyMute();
+          bgmTick();
+          bgmTimer = setInterval(bgmTick, 300);
+        } catch (e) { ac = null; }
+      },
+      resume() { try { if (ac && ac.state === 'suspended') ac.resume(); } catch (e) {} },
+      play(name) { try { if (ac && !muted && kit[name]) { this.resume(); kit[name](); } } catch (e) {} },
+      toggleMute() {
+        muted = !muted;
+        try { localStorage.setItem('pinballMute', muted ? '1' : '0'); } catch (e) {}
+        applyMute();
+        return muted;
+      },
+      isMuted: () => muted,
+    };
+  })();
+
+  // ---------- layout constants ----------
+  const WALL = 14;
+  const LANE_X = W - 46;           // launch lane inner wall x
+  const LANE_TOP = 130;            // where lane opens into main field
+  const DRAIN_Y = H - 18;
+
+  // the main field's own centerline (independent of the shooter lane bolted on past LANE_X) -
+  // the top dome, flippers, and lane guides are all mirrored around this
+  const FIELD_MID = (WALL + LANE_X) / 2;
+  const SLING_TIP_X = 111; // slingshot vertex C's x - the flipper root shares this column
+  const FLIPPER_L_X = SLING_TIP_X;
+  const FLIPPER_R_X = 2 * FIELD_MID - FLIPPER_L_X;
+  const FLIPPER_PY = H - 88; // raised 10px, then 3 more
+  const REST_ANGLE = 0.55; // must match makeFlipper's left rest angle below
+
+  const GRAVITY = 0.25;
+  const AIR_FRICTION = 0.999;
+
+  // ---------- game state ----------
+  let score = 0;
+  let ballsLeft = 3;
+  let ballInLane = true;
+  let launching = false;
+  let launchPower = 0;
+  let gameOver = false;
+  let flashTexts = [];
+  let scoreMultiplier = 1;
+  let multiplierFrames = 0; // frames left on the orbit's 2x window (60fps * 60s = 3600)
+  let upPostFrames = 0; // frames left on the center up-post (60fps * 30s = 1800), armed by clearing the drop target bank
+
+  // lock / multiball
+  const LOCK_CAPACITY = 1;             // balls to lock before multiball is armed
+  const lockSlots = [{ dx: 0, dy: 0 }]; // resting offset for each locked ball - a single ball sits dead center
+  let lockedCount = 0;
+  let multiball = false;               // 2+ balls live on the field right now
+  let pendingMultiball = false;        // lock full, waiting for the next plunge to carry a ball into play
+
+  function addScore(v, x, y) {
+    const awarded = v * scoreMultiplier;
+    score += awarded;
+    scoreEl.textContent = score;
+    flashTexts.push({ text: '+' + awarded, x, y, life: 40 });
+  }
+
+  // ---------- balls ----------
+  // the field can hold several balls at once (multiball). `ball` is a moving pointer: the collision
+  // helpers all read/write the module-level `ball`, so each substep we point it at one ball of
+  // `balls`, run the existing single-ball code, then move on to the next.
+  function makeBall() {
+    return { x: LANE_X + 16, y: H - 60, vx: 0, vy: 0, r: 9, inLane: true, locked: false, held: false };
+  }
+  let balls = [makeBall()];
+  let ball = balls[0];
+
+  // full reset back to a single fresh ball in the plunger lane (new ball after a loss, weak-launch
+  // recycle is handled separately without this, game start)
+  function resetBall() {
+    balls = [makeBall()];
+    ball = balls[0];
+    ballInLane = true;
+    launching = false;
+    launchPower = 0;
+    lockedCount = 0;
+    multiball = false;
+    pendingMultiball = false;
+    for (const k of kickbacks) { k.enabled = true; k.holding = false; k.heldBall = null; } // each new ball gets both kickbacks fresh
+    for (const t of dropTargets) t.down = false; // fresh ball also pops the drop target bank back up
+    resetScoreBonus(); // the ball coming back to the plunger (drained or recycled) clears the 2x window
+    upPostFrames = 0;  // and drops the center up-post
+  }
+
+  // add one more ball to the plunger lane without touching board progress - used after a ball is
+  // locked (the trough feeds you a replacement)
+  function serveNextBall() {
+    const b = makeBall();
+    balls.push(b);
+    ball = b;
+    ballInLane = true;
+    launching = false;
+    launchPower = 0;
+  }
+
+  // clears the running 2x-score-time multiplier/timer and darkens the ceiling lamps that feed it -
+  // called whenever the ball returns to the plunger lane (recycled or drained) and also as part of
+  // a full game-over reset
+  function resetScoreBonus() {
+    scoreMultiplier = 1;
+    multiplierFrames = 0;
+    for (const l of ceilingLamps) { l.lit = false; l.litFrames = 0; }
+    multInfoEl.textContent = '';
+  }
+
+  // full board reset for a fresh game - top lanes and kickbacks in addition to the score bonus
+  function resetProgressForNewGame() {
+    for (const l of topLanes) { l.lit = false; l.hit = 0; l.wasInside = false; }
+    for (const k of kickbacks) { k.enabled = true; k.holding = false; k.hit = 0; k.heldBall = null; }
+    lockedCount = 0;
+    multiball = false;
+    pendingMultiball = false;
+    resetScoreBonus();
+  }
+
+  // ---------- static walls (line segments) ----------
+  // each wall: {x1,y1,x2,y2, restitution}. `visible: false` still collides but isn't drawn -
+  // used for guide walls that would otherwise poke out past a flipper when it swings up.
+  const walls = [];
+  function addWall(x1, y1, x2, y2, rest = 0.55, visible = true) {
+    walls.push({ x1, y1, x2, y2, rest, visible });
+  }
+
+  // smooth quadratic curve, sampled into line segments (used for the rounded top corners)
+  function quadCurvePts(x0, y0, cx, cy, x1, y1, steps) {
+    const pts = [];
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps, mt = 1 - t;
+      pts.push({ x: mt * mt * x0 + 2 * mt * t * cx + t * t * x1, y: mt * mt * y0 + 2 * mt * t * cy + t * t * y1 });
+    }
+    return pts;
+  }
+  function addPath(pts, rest = 0.4) {
+    for (let i = 0; i < pts.length - 1; i++) addWall(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y, rest);
+  }
+
+  // ---------- outer silhouette only, no gameplay parts yet ----------
+  // one continuous rounded dome across the top (like a real cabinet's playfield glass line),
+  // straight sides, and a simple funnel at the bottom toward each flipper. The dome's peak sits
+  // exactly over the main field's centerline so both halves read as the same curve; the right
+  // half is simply longer because it has to reach down and merge into the shooter lane, which
+  // has nothing to mirror against on the left.
+  addWall(WALL, 210, WALL, H - 140, 0.4);                          // left wall
+  const domeLeft = quadCurvePts(WALL, 210, WALL, 40, FIELD_MID, 40, 14);
+  addPath(domeLeft);
+  const domeRight = quadCurvePts(FIELD_MID, 40, W - WALL, 40, W - WALL, 140, 14);
+  addPath(domeRight);
+
+  // shooter lane walls (left open above LANE_TOP so the ball can curve out into the field)
+  addWall(LANE_X, LANE_TOP, LANE_X, H - 140, 0.2);     // lane inner wall / main field right boundary
+  addWall(W - WALL, 140, W - WALL, H - 30, 0.2);       // lane outer wall
+
+  // outer wall continues down the side (both left and right)
+  addWall(WALL, H - 140, WALL, H - 40, 0.4);
+  addWall(LANE_X, H - 140, LANE_X, H - 40, 0.4);
+
+  // ---------- one-way gate: shooter lane exit ----------
+  // fills the gap between the dome and the top of the lane's inner wall. A ball leaving the
+  // shooter lane crosses it heading left into the field and passes through freely; anything
+  // travelling back toward the lane (moving right) hits it like a solid wall, so a ball can
+  // never trickle back down to the plunger once it is in play.
+  const oneWayGates = [
+    { x1: LANE_X, y1: 74, x2: LANE_X, y2: 132, blockDir: { x: 1, y: 0 }, hit: 0 },
+  ];
+  function resolveOneWayGate(g) {
+    if (ball.vx * g.blockDir.x + ball.vy * g.blockDir.y <= 0) return; // moving the allowed way - gate is open
+    const cp = closestPointOnSegment(ball.x, ball.y, g.x1, g.y1, g.x2, g.y2);
+    const dx = ball.x - cp.x, dy = ball.y - cp.y;
+    const dist = Math.hypot(dx, dy);
+    const minDist = ball.r + 3;
+    if (dist < minDist && dist > 0.0001) {
+      const nx = dx / dist, ny = dy / dist;
+      ball.x = cp.x + nx * minDist;
+      ball.y = cp.y + ny * minDist;
+      const dot = ball.vx * nx + ball.vy * ny;
+      if (dot < 0) { ball.vx -= 1.3 * dot * nx; ball.vy -= 1.3 * dot * ny; }
+      g.hit = 12;
+    }
+  }
+
+  // small rounded deflector bump - starts on the outer wall, pokes into the field, and returns
+  // to that same wall. Sits well above the lane guide below so it can't pinch a ball against it.
+  // Same protrusion depth on both sides so the two channels read as the same width.
+  const BULGE_OUT = 32;
+  // shifted 10px up from where it was, then 4px back down
+  const BULGE_TOP = H - 431, BULGE_MID = H - 393, BULGE_BOT = H - 355;
+  const leftBulge = quadCurvePts(WALL, BULGE_TOP, WALL + BULGE_OUT, BULGE_MID, WALL, BULGE_BOT, 8);
+  addPath(leftBulge, 0.5);
+  const rightBulge = quadCurvePts(LANE_X, BULGE_TOP, LANE_X - BULGE_OUT, BULGE_MID, LANE_X, BULGE_BOT, 8);
+  addPath(rightBulge, 0.5);
+
+  // ---------- outlane / return lane ----------
+  // the outlane is ONE unbroken wall from the entrance down to the outer wall (kickback sits
+  // at that junction). The return lane is a SEPARATE wall that branches off the side of the
+  // outlane's straight run, well above where the outlane itself bends - the two paths must not
+  // meet at a single shared vertex, or the last one resolved each frame always wins the tie and
+  // the ball can never actually end up in the other lane. The return lane runs close to
+  // straight down (an "L", not a long diagonal) and ends just short of the flipper, so the ball
+  // free-falls the last bit onto the arm.
+  //
+  // every left-side point below is mirrored into its right-side twin with mirrorX()/mirrorPt(),
+  // so the two halves are guaranteed to match pixel-for-pixel. (Hand-copying each right-side
+  // point as "LANE_X - n" instead is only a true mirror when n happens to be measured from
+  // WALL already - it wasn't, for several of these points, which is what made the flippers and
+  // their lane walls visibly lopsided before.)
+  const mirrorX = (x) => WALL + LANE_X - x;
+  const mirrorPt = (p) => ({ x: mirrorX(p.x), y: p.y });
+
+  const LANE_INNER_L = WALL + 24, LANE_INNER_R = mirrorX(LANE_INNER_L);
+  const BRANCH_Y = H - 230; // return lane splits off the outlane's straight run here
+
+  addWall(LANE_INNER_L, H - 280, LANE_INNER_L, H - 160, 0.4);
+  addWall(LANE_INNER_R, H - 280, LANE_INNER_R, H - 160, 0.4);
+
+  const KICK_R = 12;
+  const kickL = { x: WALL + 12, y: H - 100 };
+  const kickR = mirrorPt(kickL);
+
+  // return lane: branches off the side of the outlane's straight run, then runs straight down
+  // toward the flipper - an "L", not a long diagonal. branchL->cornerL is a true vertical (same
+  // x as branchL) so it reads as one clean vertical wall, not a lane that flares open at the top.
+  // Ends short of the flipper (not touching the outer wall or anything else) so the ball
+  // free-falls the last bit onto the arm.
+  const branchL = { x: LANE_INNER_L, y: BRANCH_Y };
+  const cornerL = { x: branchL.x, y: H - 160 }; // shortened 30px so the flipper's longer arm has room
+  // fixed in place rather than derived from FLIPPER_PY, so lowering the flipper (below) opens up
+  // real clearance between this endpoint and the pivot instead of the two moving together and
+  // staying just as close - that closeness was what made the wall look like it ran into the
+  // flipper's own rotating parts.
+  const flipperNearL = { x: FLIPPER_L_X - 8, y: 575 };
+  const branchR = mirrorPt(branchL);
+  const cornerR = mirrorPt(cornerL);
+  const flipperNearR = mirrorPt(flipperNearL);
+  addWall(branchL.x, branchL.y, cornerL.x, cornerL.y, 0.4);
+  addWall(cornerL.x, cornerL.y, flipperNearL.x, flipperNearL.y, 0.5);
+  addWall(branchR.x, branchR.y, cornerR.x, cornerR.y, 0.4);
+  addWall(cornerR.x, cornerR.y, flipperNearR.x, flipperNearR.y, 0.5);
+
+  // (kept as farL/farR too, for reference elsewhere)
+  const farL = branchL, farR = branchR;
+
+  // ---------- slingshots ----------
+  // a plain, solid-filled triangle: a literal vertical edge on the wall side (top corner A
+  // straight down to bottom corner B), a straight edge from B down-and-right to the tip C, and
+  // the long outer edge from C back up to A closing it. All three edges collide, so nothing
+  // slips into the filled interior. Both sides share one color so they read as the same part
+  // mirrored.
+  const SLING_COLOR = '#7dff8a';
+  // A/B sit 27px off the vertical return-lane wall (x=38) for their whole shared height - more
+  // than the 22px theoretical minimum (ball radius 9 + wall's collision margin 9 + slingshot's
+  // collision margin 4), so the lane reads as tight but genuinely passable.
+  // base (mirror-source) points - the right slingshot always mirrors these, unmoved
+  const slingAL0 = { x: 72, y: 429 }; // top of the vertical edge
+  const slingBL0 = { x: 72, y: 504 }; // bottom of the vertical edge
+  const slingCL0 = { x: SLING_TIP_X, y: 533 }; // tip - shares an x-column with the flipper root
+  // whole triangle raised one ball-width (18px) - it was pinching the return lane against the
+  // LANE_INNER wall/corner just below it, tight enough that the ball couldn't get through
+  const slingPtsL0 = [slingAL0, slingBL0, slingCL0];
+  // left slingshot only, shifted 2px further up - deliberately breaks the left/right symmetry
+  const SLING_L_DY = -2;
+  const slingPtsL = slingPtsL0.map((p) => ({ x: p.x, y: p.y + SLING_L_DY }));
+
+  function makeSlingshot(pts, color) {
+    return { pts, color, hit: 0 };
+  }
+  const slingshots = [
+    makeSlingshot(slingPtsL, SLING_COLOR),
+    makeSlingshot(slingPtsL0.map(mirrorPt), SLING_COLOR),
+  ];
+  // every edge collides - the shape reads as solid now, so nothing should be able to slip
+  // through any side of it. Edge 0 (A-B, the vertical wall-side edge) and edge 1 (B-C, the
+  // diagonal edge down to the tip) have zero restitution - the ball just stops dead on them
+  // instead of bouncing. Edge 2 (C-A, the long outer face) keeps the springy kick.
+  const slingshotEdges = [];
+  for (const s of slingshots) {
+    for (let i = 0; i < s.pts.length; i++) {
+      const a = s.pts[i], b = s.pts[(i + 1) % s.pts.length];
+      slingshotEdges.push({ x1: a.x, y1: a.y, x2: b.x, y2: b.y, parent: s, noBounce: i === 0 || i === 1 });
+    }
+  }
+
+  // ---------- lane sensors: pass-through gates on the return lane and outlane ----------
+  // plain gray tripwires, no bounce - just a +10 rollover each time the ball crosses one,
+  // mirrored left/right through mirrorX like the rest of the outlane geometry.
+  const LANE_SENSOR_Y = 465;
+  const laneSensors = [
+    { x1: LANE_INNER_L, x2: slingAL0.x, y: LANE_SENSOR_Y, wasInside: false, hit: 0 }, // return lane, left
+    { x1: mirrorX(slingAL0.x), x2: LANE_INNER_R, y: LANE_SENSOR_Y, wasInside: false, hit: 0 }, // return lane, right
+    { x1: WALL, x2: LANE_INNER_L, y: LANE_SENSOR_Y, wasInside: false, hit: 0 }, // outlane, left
+    { x1: LANE_INNER_R, x2: mirrorX(WALL), y: LANE_SENSOR_Y, wasInside: false, hit: 0 }, // outlane, right
+  ];
+  function checkLaneSensors() {
+    for (const s of laneSensors) {
+      const inside = ball.x >= s.x1 && ball.x <= s.x2 && ball.y >= s.y - 4 && ball.y <= s.y + 4;
+      if (inside && !s.wasInside) {
+        addScore(10, (s.x1 + s.x2) / 2, s.y - 6);
+        s.hit = 16;
+        AudioSys.play('lane');
+      }
+      s.wasInside = inside;
+    }
+  }
+
+  // ---------- top lanes: rollover lanes just under the dome ----------
+  // 4 lanes, pass-through only (no bounce inside a lane itself). Each lane lights and stays lit
+  // the first time the ball crosses it; once all 4 are lit, they all reset dark and the center
+  // up-post pops up for 30s as the reward. Physical divider pegs between lanes still collide
+  // normally, same as any other wall.
+  const TOP_LANE_TOP = 162, TOP_LANE_BOT = 211;
+  const TOP_LANE_COUNT = 4;
+  const TOP_LANE_W = 44, TOP_LANE_GAP = 6;
+  const topLaneSpan = TOP_LANE_COUNT * TOP_LANE_W + (TOP_LANE_COUNT - 1) * TOP_LANE_GAP;
+  const topLaneX0 = FIELD_MID - topLaneSpan / 2;
+  const topLanes = [];
+  for (let i = 0; i < TOP_LANE_COUNT; i++) {
+    const x1 = topLaneX0 + i * (TOP_LANE_W + TOP_LANE_GAP);
+    const x2 = x1 + TOP_LANE_W;
+    topLanes.push({ x1, x2, hit: 0, wasInside: false, lit: false });
+    if (i > 0) {
+      const dx = x1 - TOP_LANE_GAP / 2;
+      addWall(dx, TOP_LANE_TOP, dx, TOP_LANE_BOT - 5, 0.5); // divider peg, 5px shorter at the bottom
+    }
+  }
+
+  function checkTopLanes() {
+    for (const l of topLanes) {
+      const inside = ball.x >= l.x1 && ball.x <= l.x2 && ball.y >= TOP_LANE_TOP && ball.y <= TOP_LANE_BOT;
+      if (inside && !l.wasInside) {
+        if (!l.lit) {
+          l.lit = true;
+          addScore(50, (l.x1 + l.x2) / 2, TOP_LANE_TOP - 4);
+          AudioSys.play('lane');
+        }
+        l.hit = 16;
+      }
+      l.wasInside = inside;
+    }
+    if (topLanes.every((l) => l.lit)) {
+      for (const l of topLanes) l.lit = false;
+      upPostFrames = 1800; // all 4 lit -> center up-post on for 30s (60fps)
+      AudioSys.play('bank');
+    }
+  }
+
+  // ---------- bumpers: pop bumpers, always-on radial kick + score ----------
+  const BUMPER_R = 22;
+  // deliberately not mirrored left/right - an even triangle read as too mechanical. Clustered
+  // toward the left for a clean sightline up from the flippers.
+  const bumpers = [
+    { x: 185, y: 245, r: BUMPER_R, hit: 0 }, // center bumper, nudged around a few px over time (its drop target below follows)
+    { x: 123, y: 305, r: BUMPER_R, hit: 0 },
+    { x: 251, y: 320, r: BUMPER_R, hit: 0 },
+  ];
+
+  function resolveBumper(b) {
+    const dx = ball.x - b.x, dy = ball.y - b.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const minDist = ball.r + b.r;
+    if (dist < minDist && dist > 0.0001) {
+      const nx = dx / dist, ny = dy / dist;
+      ball.x = b.x + nx * minDist;
+      ball.y = b.y + ny * minDist;
+      const kick = 11;
+      ball.vx = nx * kick;
+      ball.vy = ny * kick;
+      b.hit = 14;
+      addScore(10, b.x, b.y - b.r - 6);
+      AudioSys.play('bumper');
+    }
+  }
+
+  // ---------- drop targets: a bank of 3 in the open gap between the bumpers and the slingshots ----------
+  // each one blocks the ball with a firm bounce the first time, then drops flat and stops
+  // colliding. Clearing all 3 scores a bank bonus, pops them back up, and re-arms the kickbacks.
+  const DROP_TARGET_W = 28;
+  // one target directly under each bumper, far enough below to clear its radius
+  // targets are stored as plain segments (x1,y1,x2,y2) so the same resolver works for the
+  // horizontal bumper-bank bars and the vertical bulge-bank bars alike
+  function makeDropTarget(x1, y1, x2, y2) {
+    return { x1, y1, x2, y2, down: false, hit: 0 };
+  }
+  const dropTargets = bumpers.map((b) => { // one target under each bumper
+    const y = b.y + b.r + 22;
+    return makeDropTarget(b.x - DROP_TARGET_W / 2, y, b.x + DROP_TARGET_W / 2, y);
+  });
+  function resolveDropTargetIn(group, t, bonusX, bonusY) {
+    if (t.down) return;
+    const cp = closestPointOnSegment(ball.x, ball.y, t.x1, t.y1, t.x2, t.y2);
+    const dx = ball.x - cp.x, dy = ball.y - cp.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const minDist = ball.r + 3;
+    if (dist < minDist && dist > 0.0001) {
+      const nx = dx / dist, ny = dy / dist;
+      ball.x = cp.x + nx * minDist;
+      ball.y = cp.y + ny * minDist;
+      const dot = ball.vx * nx + ball.vy * ny;
+      if (dot < 0) { ball.vx -= 1.3 * dot * nx; ball.vy -= 1.3 * dot * ny; }
+      t.down = true;
+      t.hit = 16;
+      addScore(25, (t.x1 + t.x2) / 2, (t.y1 + t.y2) / 2 - 10);
+      AudioSys.play('drop');
+      if (group.every((d) => d.down)) {
+        addScore(100, bonusX, bonusY);
+        for (const d of group) d.down = false;
+        if (group === dropTargets) { for (const k of kickbacks) k.enabled = true; } // clearing the whole bank re-arms both kickbacks
+        AudioSys.play('bank');
+      }
+    }
+  }
+  function resolveDropTarget(t) {
+    resolveDropTargetIn(dropTargets, t, FIELD_MID, t.y1 - 10);
+  }
+
+  // ---------- up-post: center drain stopper ----------
+  // a single post just left of the drain throat's center, a touch below the flipper tips. Normally
+  // retracted (upPostFrames === 0, no collision at all); lighting all 4 top lanes pops it up for
+  // 30s, so a ball rolling down the middle is bounced back into play instead of draining. It
+  // blinks through its last 3 seconds as a warning.
+  const upPost = { x: FIELD_MID - 3, y: H - 39, r: 8, hit: 0 };
+  function resolveUpPost() {
+    if (upPostFrames <= 0) return;
+    const dx = ball.x - upPost.x, dy = ball.y - upPost.y;
+    const dist = Math.hypot(dx, dy);
+    const minDist = ball.r + upPost.r;
+    if (dist < minDist && dist > 0.0001) {
+      const nx = dx / dist, ny = dy / dist;
+      ball.x = upPost.x + nx * minDist;
+      ball.y = upPost.y + ny * minDist;
+      const dot = ball.vx * nx + ball.vy * ny;
+      if (dot < 0) {
+        const rest = 0.45;
+        ball.vx -= (1 + rest) * dot * nx;
+        ball.vy -= (1 + rest) * dot * ny;
+        upPost.hit = 12;
+        AudioSys.play('uppost');
+      }
+    }
+  }
+
+  // ---------- orbit lanes: flat-rail guides framing the top ----------
+  // a flat rail is just a straight guide wall - the corridor between it and the outer wall/dome
+  // is the orbit lane, letting a strong shot up the shooter lane loop across the top instead of
+  // dropping straight into the bumpers. Left/right mirror through mirrorPt like everything else,
+  // so shifting the left rail +5 in x automatically pulls the right rail -5 (both move inward).
+  const railL1 = { x: 75, y: 240 }; // shortened - was reaching well past the top lanes down toward the bumpers
+  const railL2 = { x: 67, y: 170 };
+  const railL3 = { x: 151, y: 78 };
+  addWall(railL1.x, railL1.y, railL2.x, railL2.y, 0.5);
+  addWall(railL2.x, railL2.y, railL3.x, railL3.y, 0.5);
+  const railR1 = mirrorPt(railL1), railR2 = mirrorPt(railL2), railR3 = mirrorPt(railL3);
+  addWall(railR1.x, railR1.y, railR2.x, railR2.y, 0.5);
+  addWall(railR2.x, railR2.y, railR3.x, railR3.y, 0.5);
+  // the four flat-rail segments just added draw white (otherwise ordinary walls)
+  for (const w of walls.slice(-4)) w.color = '#ffffff';
+
+  // (the arch rebound that used to bridge the two rail tops was removed - the top is open now, so
+  // a dead-center shot rides up to the dome and can drop into the lock hole)
+  // (the old peak rollover sensor here was removed too - see the `bumpers` array / lock hole)
+
+  // ---------- ceiling lamps: 5 round rollover dots strung along the top dome wall ----------
+  // pass-through sensors, no bounce, no score of their own. Each lights on contact and fades on
+  // its own 3s timer; light all 5 within that window and it fires the 2x score-time bonus (+75,
+  // 30s window, +2 to the multiplier each time all 5 are completed again), then the 5 reset dark.
+  // Positioned just inside the top dome wall, evenly spaced by arc length rather than by point
+  // index so they read as an even string of lights along the wall.
+  const CEILING_LAMP_R = 6;
+  const CEILING_LAMP_FRAMES = 180; // 3s at 60fps
+  // walks the polyline by arc length and also nudges each sample point outward (perpendicular to
+  // the local direction of travel, toward the dome/wall) by `outward` px - without this the points
+  // land exactly ON the rail/arch line itself instead of in the open lane beside it
+  function pointsAlongPath(pts, n, outward = 0) {
+    const segLens = [];
+    let total = 0;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const d = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+      segLens.push(d);
+      total += d;
+    }
+    const result = [];
+    for (let i = 0; i < n; i++) {
+      const target = total * (i + 0.5) / n;
+      let acc = 0, idx = 0;
+      while (idx < segLens.length - 1 && acc + segLens[idx] < target) { acc += segLens[idx]; idx++; }
+      const segLen = segLens[idx] || 1;
+      const frac = (target - acc) / segLen;
+      const a = pts[idx], b = pts[idx + 1];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const px = dy / len, py = -dx / len; // outward normal for this left-to-right, over-the-top path
+      result.push({ x: a.x + dx * frac + px * outward, y: a.y + dy * frac + py * outward });
+    }
+    return result;
+  }
+  // negative `outward` nudges the dots off the wall and into the field (toward the playfield)
+  const ceilingLampPath = [...domeLeft.slice(3), ...domeRight.slice(0, 12)];
+  const ceilingLamps = pointsAlongPath(ceilingLampPath, 5, -16).map((p) => ({ x: p.x, y: p.y, lit: false, litFrames: 0 }));
+  function checkCeilingLamps() {
+    for (const l of ceilingLamps) {
+      const dist = Math.hypot(ball.x - l.x, ball.y - l.y);
+      if (dist < ball.r + CEILING_LAMP_R) {
+        if (!l.lit) AudioSys.play('lamp');
+        l.lit = true;
+        l.litFrames = CEILING_LAMP_FRAMES;
+      }
+    }
+    if (ceilingLamps.every((l) => l.lit)) {
+      // all 5 lit at once - the 2x score-time bonus (was the orbit lap's job). Stack +2 onto a
+      // still-running multiplier, otherwise start at 2x; either way restart the 30s window.
+      scoreMultiplier = multiplierFrames > 0 ? scoreMultiplier + 2 : 2;
+      multiplierFrames = 1800; // 30s cap at 60fps
+      addScore(75, FIELD_MID, 64); // scored at the just-updated multiplier
+      for (const l of ceilingLamps) { l.lit = false; l.litFrames = 0; }
+      AudioSys.play('multiplier');
+    }
+  }
+
+  // ---------- lock hole: capture a ball, then multiball ----------
+  // a hole below the open top. While it is armed (fewer than LOCK_CAPACITY balls locked and no
+  // multiball running) a ball that rolls into it is captured and held dead centre, and the trough
+  // feeds a replacement to the plunger. Lock one ball and the next plunge starts multiball - the
+  // held ball is spat back onto the field so 2 are in play at once.
+  const lockHole = { x: FIELD_MID, y: 105, r: 11, hit: 0 };
+  function checkLockHole() {
+    if (multiball || pendingMultiball || lockedCount >= LOCK_CAPACITY) return;
+    if (ball.inLane || ball.locked || ball.held) return;
+    if (Math.hypot(ball.x - lockHole.x, ball.y - lockHole.y) >= ball.r + lockHole.r) return;
+    const slot = lockSlots[lockedCount] || { dx: 0, dy: 0 };
+    ball.locked = true;
+    ball.vx = 0; ball.vy = 0;
+    ball.x = lockHole.x + slot.dx;
+    ball.y = lockHole.y + slot.dy;
+    lockedCount++;
+    lockHole.hit = 16;
+    addScore(150, lockHole.x, lockHole.y - 18);
+    AudioSys.play('lock');
+    if (lockedCount >= LOCK_CAPACITY) {
+      pendingMultiball = true;
+      flashTexts.push({ text: 'PLUNGE = MULTIBALL', x: FIELD_MID, y: 140, life: 150 });
+    } else {
+      flashTexts.push({ text: 'BALL ' + lockedCount + ' LOCKED', x: FIELD_MID, y: 140, life: 90 });
+    }
+    serveNextBall();
+  }
+
+  // equal-mass circle bounce between every pair of balls so a multiball crowd doesn't overlap.
+  // a locked/held ball counts as immovable - the moving ball just bounces off it.
+  function resolveBallBall() {
+    for (let i = 0; i < balls.length; i++) {
+      for (let j = i + 1; j < balls.length; j++) {
+        const a = balls[i], b = balls[j];
+        if (a.inLane || b.inLane) continue;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.hypot(dx, dy);
+        const minDist = a.r + b.r;
+        if (dist >= minDist || dist < 0.0001) continue;
+        const nx = dx / dist, ny = dy / dist, overlap = minDist - dist;
+        const aFix = a.locked || a.held, bFix = b.locked || b.held;
+        if (aFix && bFix) continue;
+        if (aFix) { b.x += nx * overlap; b.y += ny * overlap; }
+        else if (bFix) { a.x -= nx * overlap; a.y -= ny * overlap; }
+        else { a.x -= nx * overlap / 2; a.y -= ny * overlap / 2; b.x += nx * overlap / 2; b.y += ny * overlap / 2; }
+        const vn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+        if (vn < 0) {
+          const denom = (aFix ? 0 : 1) + (bFix ? 0 : 1);
+          const imp = (-(1.6) * vn) / (denom || 1);
+          if (!aFix) { a.vx -= imp * nx; a.vy -= imp * ny; }
+          if (!bFix) { b.vx += imp * nx; b.vy += imp * ny; }
+        }
+      }
+    }
+  }
+
+  // ---------- kickbacks: rescue mechanism along the outlane ----------
+  // fires once per ball; if not used, the ball just keeps going past the flipper's reach.
+  // catching a ball holds it in place briefly (like a real captive-ball kickback solenoid winding
+  // up) before launching it back up - each kickback remembers which ball it caught in `heldBall`.
+  const KICKBACK_HOLD_FRAMES = 24;
+  // dir.x kept small and close to vertical - too much sideways speed here carries the ball into
+  // the bulge deflector, which throws it inward straight into a bumper; the bumper's radial kick
+  // then sends it right back down the same outlane it just escaped. A near-vertical shot mostly
+  // dodges that chain (verified by stepping update() headlessly over many candidate values).
+  const kickbacks = [
+    { x: kickL.x, y: kickL.y, r: KICK_R, dir: { x: -0.05, y: -1 }, hit: 0, enabled: true, holding: false, holdTimer: 0, heldBall: null },
+    { x: kickR.x, y: kickR.y, r: KICK_R, dir: { x: 0.05, y: -1 }, hit: 0, enabled: true, holding: false, holdTimer: 0, heldBall: null },
+  ];
+
+  // ---------- flippers ----------
+  function makeFlipper(pivotX, pivotY, length, side) {
+    // side: 'L' rest angle points down-outward-left ; 'R' mirrored
+    const restAngle = side === 'L' ? 0.55 : Math.PI - 0.55;
+    const activeAngle = side === 'L' ? -0.55 : Math.PI + 0.55;
+    return {
+      px: pivotX, py: pivotY, len: length, side,
+      angle: restAngle, restAngle, activeAngle,
+      angVel: 0, active: false, thickness: 9
+    };
+  }
+  const flipperL = makeFlipper(FLIPPER_L_X, FLIPPER_PY, 73, 'L');
+  const flipperR = makeFlipper(FLIPPER_R_X, FLIPPER_PY, 73, 'R');
+
+  // substeps: how many slices this frame's rotation is divided into, so the flipper's
+  // fast sweep gets checked against the ball incrementally instead of jumping in one
+  // big step (which let a ball near the tip pass clean through without a collision ever
+  // registering on the same frame)
+  function updateFlipper(f, substeps = 1, dtScale = 1) {
+    const target = f.active ? f.activeAngle : f.restAngle;
+    // lowering (back to rest) is slower than the raise/flip swing - a ball cradled on a raised
+    // flipper should roll off when you let go, not get flung by the surface's own sweep speed
+    // (resolveFlipperCollision below carries a share of that speed into whatever is resting on
+    // it). The raise stays fast so flip shots keep their full power.
+    const baseSpeed = f.active ? 0.35 : 0.08;
+    const speed = (baseSpeed * dtScale) / substeps; // rad per substep toward target
+    const prevAngle = f.angle;
+    if (Math.abs(target - f.angle) < speed) {
+      f.angle = target;
+    } else {
+      f.angle += Math.sign(target - f.angle) * speed;
+    }
+    f.angVel = (f.angle - prevAngle) * substeps;
+  }
+
+  function flipperTip(f) {
+    return { x: f.px + Math.cos(f.angle) * f.len, y: f.py + Math.sin(f.angle) * f.len };
+  }
+
+  // ---------- collision helpers ----------
+  function closestPointOnSegment(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq === 0 ? 0 : ((px - x1) * dx + (py - y1) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    return { x: x1 + t * dx, y: y1 + t * dy, t };
+  }
+
+  function resolveWallCollision(seg, thickness) {
+    const cp = closestPointOnSegment(ball.x, ball.y, seg.x1, seg.y1, seg.x2, seg.y2);
+    const dx = ball.x - cp.x, dy = ball.y - cp.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const minDist = ball.r + (thickness || 0);
+    if (dist < minDist && dist > 0.0001) {
+      const nx = dx / dist, ny = dy / dist;
+      const overlap = minDist - dist;
+      ball.x += nx * overlap;
+      ball.y += ny * overlap;
+      const dot = ball.vx * nx + ball.vy * ny;
+      const rest = seg.rest !== undefined ? seg.rest : 0.5;
+      ball.vx -= (1 + rest) * dot * nx;
+      ball.vy -= (1 + rest) * dot * ny;
+      return true;
+    }
+    return false;
+  }
+
+  function resolveFlipperCollision(f) {
+    const tip = flipperTip(f);
+    // the collision segment starts a little behind the pivot (opposite the arm direction), not
+    // exactly at it. Without this, a ball resting just behind the pivot - which is exactly where
+    // a ball trickling in from the return lane naturally comes to rest - clips to the pivot as a
+    // fixed point (t=0) that doesn't move with the flipper's rotation, so it never gets swept and
+    // sits there forever even while the flipper is actively swinging. Extending the segment back
+    // makes that whole area rotate with the flipper like the rest of the arm.
+    const BACK = 22;
+    const baseX = f.px - Math.cos(f.angle) * BACK, baseY = f.py - Math.sin(f.angle) * BACK;
+    const cp = closestPointOnSegment(ball.x, ball.y, baseX, baseY, tip.x, tip.y);
+    const dx = ball.x - cp.x, dy = ball.y - cp.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const minDist = ball.r + f.thickness;
+    if (dist < minDist && dist > 0.0001) {
+      const nx = dx / dist, ny = dy / dist;
+      ball.x = cp.x + nx * minDist;
+      ball.y = cp.y + ny * minDist;
+
+      // velocity of the flipper's own surface at the contact point (tangential to its
+      // rotation) - a fast swing near the tip should give a strong, correctly-directed
+      // kick, not just a fixed nudge along the contact normal
+      const contactDist = Math.hypot(cp.x - f.px, cp.y - f.py);
+      const surfVX = -Math.sin(f.angle) * f.angVel * contactDist;
+      const surfVY = Math.cos(f.angle) * f.angVel * contactDist;
+
+      // reflect the ball's velocity relative to that moving surface, then carry
+      // along a share of the surface's own motion for a lively, physical flip
+      const relVX = ball.vx - surfVX, relVY = ball.vy - surfVY;
+      const dot = relVX * nx + relVY * ny;
+      const rest = 0.5;
+      ball.vx -= (1 + rest) * dot * nx;
+      ball.vy -= (1 + rest) * dot * ny;
+      ball.vx += surfVX * 0.7;
+      ball.vy += surfVY * 0.7;
+    }
+  }
+
+  function resolveKickback(k) {
+    if (!k.enabled) return; // spent - the ball just rolls past
+    const dx = ball.x - k.x, dy = ball.y - k.y;
+    const dist = Math.hypot(dx, dy);
+    const minDist = ball.r + k.r;
+    if (k.holding) {
+      // already holding a ball (multiball can send a second one down the same outlane) - bounce
+      // it off like a solid obstacle instead of silently ignoring it. Ignoring it used to let the
+      // second ball come to rest pressed against the held ball, and the held ball's own release
+      // velocity would then transfer into it on contact (a Newton's-cradle swap) instead of
+      // carrying the ball that actually earned the kickback.
+      if (dist < minDist && dist > 0.0001) {
+        const nx = dx / dist, ny = dy / dist;
+        ball.x = k.x + nx * minDist;
+        ball.y = k.y + ny * minDist;
+        const dot = ball.vx * nx + ball.vy * ny;
+        if (dot < 0) { const rest = 0.4; ball.vx -= (1 + rest) * dot * nx; ball.vy -= (1 + rest) * dot * ny; }
+      }
+      return;
+    }
+    if (dist < minDist && dist > 0.0001) {
+      // caught - freeze the ball right in the hole instead of bouncing it immediately;
+      // update() counts down k.holdTimer and launches it once the hold expires
+      ball.x = k.x;
+      ball.y = k.y;
+      ball.vx = 0;
+      ball.vy = 0;
+      ball.held = true;
+      k.holding = true;
+      k.holdTimer = KICKBACK_HOLD_FRAMES;
+      k.heldBall = ball;
+      AudioSys.play('kickback');
+    }
+  }
+
+  function resolveSlingshot(edge) {
+    const cp = closestPointOnSegment(ball.x, ball.y, edge.x1, edge.y1, edge.x2, edge.y2);
+    const dx = ball.x - cp.x, dy = ball.y - cp.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const minDist = ball.r + 4;
+    if (dist < minDist && dist > 0.0001) {
+      const nx = dx / dist, ny = dy / dist;
+      ball.x = cp.x + nx * minDist;
+      ball.y = cp.y + ny * minDist;
+      if (edge.noBounce) {
+        const dot = ball.vx * nx + ball.vy * ny;
+        if (dot < 0) { ball.vx -= dot * nx; ball.vy -= dot * ny; }
+      } else {
+        // kick is mostly straight up regardless of hit angle, with only a mild sideways nudge -
+        // the old nx/ny-driven kick could send the ball directly across at the mirrored
+        // slingshot with matching speed, so the two would volley it back and forth forever
+        const kick = 9;
+        ball.vx = nx * kick * 0.4;
+        ball.vy = -kick - 2;
+        edge.parent.hit = 10;
+        AudioSys.play('sling');
+      }
+    }
+  }
+
+  // ---------- input ----------
+  function startLeftFlipper() { if (!flipperL.active) AudioSys.play('flipper'); flipperL.active = true; }
+  function stopLeftFlipper() { flipperL.active = false; }
+  function startRightFlipper() { if (!flipperR.active) AudioSys.play('flipper'); flipperR.active = true; }
+  function stopRightFlipper() { flipperR.active = false; }
+
+  function startLaunch() {
+    if (!gameOver && balls.some((b) => b.inLane)) launching = true;
+  }
+  function releaseLaunch() {
+    const laneBall = balls.find((b) => b.inLane);
+    if (launching && laneBall) {
+      const power = 17 + launchPower * 0.22;
+      laneBall.vy = -Math.min(power, 30);
+      laneBall.vx = -0.5;
+      laneBall.inLane = false;
+      ballInLane = false;
+      AudioSys.play('launch');
+    }
+    launching = false;
+    launchPower = 0;
+  }
+
+  const SPACE_KEYS = [' ', 'spacebar', 'space'];
+  // undocumented alternate flipper keys - not shown in the on-screen guide
+  const LEFT_ALT_KEYS = ['§'];
+  const RIGHT_ALT_KEYS = ['Backspace'];
+  window.addEventListener('keydown', (e) => {
+    const key = e.key.toLowerCase();
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || SPACE_KEYS.includes(key) || e.code === 'Space' || RIGHT_ALT_KEYS.includes(e.key)) {
+      e.preventDefault();
+    }
+    if (key === 'm' && !e.repeat) {
+      AudioSys.init();
+      const m = AudioSys.toggleMute();
+      flashTexts.push({ text: m ? 'SOUND OFF' : 'SOUND ON', x: FIELD_MID, y: 300, life: 80 });
+    }
+    if (e.key === 'ArrowLeft' || key === 'a' || LEFT_ALT_KEYS.includes(e.key)) startLeftFlipper();
+    if (e.key === 'ArrowRight' || key === 'l' || RIGHT_ALT_KEYS.includes(e.key)) startRightFlipper();
+    if (SPACE_KEYS.includes(key) || e.code === 'Space') {
+      // while the start/game-over overlay is up, Space stands in for clicking "プレイ"
+      if (msgEl.style.display !== 'none') {
+        if (!e.repeat) restartBtn.click();
+      } else {
+        startLaunch();
+      }
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    const key = e.key.toLowerCase();
+    if (e.key === 'ArrowLeft' || key === 'a' || LEFT_ALT_KEYS.includes(e.key)) stopLeftFlipper();
+    if (e.key === 'ArrowRight' || key === 'l' || RIGHT_ALT_KEYS.includes(e.key)) stopRightFlipper();
+    if (SPACE_KEYS.includes(key) || e.code === 'Space') releaseLaunch();
+  });
+
+  // ---------- touch input (phones) ----------
+  // each finger gets a role on touch-down from where it lands on the board: the plunger lane column
+  // (only while a ball waits there) charges the launch, otherwise the left/right half works that
+  // flipper. Touches outside the canvas still count by side, so thumbs can rest below the board.
+  const touchRoles = new Map();
+  function touchRoleHeld(role) {
+    for (const r of touchRoles.values()) if (r === role) return true;
+    return false;
+  }
+  window.addEventListener('pointerdown', (e) => {
+    if (msgEl.style.display !== 'none') return; // let the overlay's プレイ button get its click
+    if (e.target.closest && e.target.closest('#hud')) return;
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const cx = (e.clientX - rect.left) * W / rect.width;
+    let role;
+    if (cx >= LANE_X - 6 && !gameOver && balls.some((b) => b.inLane)) role = 'launch';
+    else role = cx < FIELD_MID ? 'L' : 'R';
+    touchRoles.set(e.pointerId, role);
+    if (role === 'launch') startLaunch();
+    else if (role === 'L') startLeftFlipper();
+    else startRightFlipper();
+  }, { passive: false });
+  function endTouch(e) {
+    const role = touchRoles.get(e.pointerId);
+    if (!role) return;
+    touchRoles.delete(e.pointerId);
+    if (touchRoleHeld(role)) return; // another finger still holds the same control
+    if (role === 'launch') releaseLaunch();
+    else if (role === 'L') stopLeftFlipper();
+    else stopRightFlipper();
+  }
+  window.addEventListener('pointerup', endTouch);
+  window.addEventListener('pointercancel', endTouch);
+  // phones have no M key - tapping the score bar toggles sound instead
+  document.getElementById('hud').addEventListener('click', () => {
+    AudioSys.init();
+    const m = AudioSys.toggleMute();
+    flashTexts.push({ text: m ? 'SOUND OFF' : 'SOUND ON', x: FIELD_MID, y: 300, life: 80 });
+  });
+
+  restartBtn.addEventListener('click', () => {
+    AudioSys.init(); // first user gesture - safe to start audio now
+    if (gameOver) {
+      score = 0;
+      ballsLeft = 3;
+      gameOver = false;
+      scoreEl.textContent = score;
+      ballsEl.textContent = ballsLeft;
+      resetProgressForNewGame();
+      resetBall();
+    }
+    msgEl.style.display = 'none';
+  });
+
+  // ---------- main update ----------
+  function loseBall() {
+    ballsLeft--;
+    ballsEl.textContent = ballsLeft;
+    AudioSys.play('drain');
+    if (ballsLeft <= 0) {
+      gameOver = true;
+      if (score > high) {
+        high = score;
+        localStorage.setItem('pinballHigh', String(high));
+        highEl.textContent = high;
+      }
+      resetProgressForNewGame();
+      msgText.textContent = 'GAME OVER';
+      msgScoreVal.textContent = score;
+      msgEl.style.display = 'block';
+    } else {
+      // keep any balls sitting in the lock (the trough holds onto them across a ball change) and
+      // feed a fresh ball to the plunger; clear the rest of the board like a normal new ball
+      balls = balls.filter((b) => b.locked);
+      lockedCount = balls.length;
+      multiball = false;
+      pendingMultiball = lockedCount >= LOCK_CAPACITY;
+      launching = false;
+      launchPower = 0;
+      for (const k of kickbacks) { k.enabled = true; k.holding = false; k.heldBall = null; }
+      for (const t of dropTargets) t.down = false;
+      resetScoreBonus();
+      upPostFrames = 0;
+      serveNextBall();
+    }
+  }
+
+  function resolveAllCollisions() {
+    for (const seg of walls) resolveWallCollision(seg, 0);
+    for (const g of oneWayGates) resolveOneWayGate(g);
+
+    for (const k of kickbacks) resolveKickback(k);
+    for (const e of slingshotEdges) resolveSlingshot(e);
+    for (const b of bumpers) resolveBumper(b);
+    for (const t of dropTargets) resolveDropTarget(t);
+    resolveUpPost();
+
+    resolveFlipperCollision(flipperL);
+    resolveFlipperCollision(flipperR);
+
+    // hard safety clamp: guarantees the ball can never tunnel out of bounds
+    // even if it moves faster than a single collision pass can catch
+    const MIN_Y = 16;
+    if (ball.y < MIN_Y) { ball.y = MIN_Y; ball.vy = Math.abs(ball.vy) * 0.5; }
+    if (ball.x < WALL + ball.r) { ball.x = WALL + ball.r; ball.vx *= -0.4; }
+    if (ball.x > W - WALL - ball.r) { ball.x = W - WALL - ball.r; ball.vx *= -0.4; }
+
+    // dead-zone guard: the dome curves sweep sideways fast right above the shooter lane's exit
+    // (y<140) - a ball still carrying mostly-vertical speed from a strong launch can cross that
+    // height before its x catches up, landing on the wrong (decorative, non-playable) side of
+    // the curve. From there the curve's own collision only pushes it further out, so it gets
+    // wedged in the corner pocket permanently. Clamp it back onto the curve's inside instead.
+    if (ball.y > 40 && ball.y < 140) {
+      const tR = Math.sqrt((ball.y - 40) / 100);
+      const boundR = 194 * (1 - tR) * (1 - tR) + 406 * tR * (2 - tR);
+      if (ball.x > boundR - ball.r) { ball.x = boundR - ball.r; ball.vx = -Math.abs(ball.vx) * 0.5; }
+    }
+    if (ball.y > 40 && ball.y < 210) {
+      const tL = 1 - Math.sqrt((ball.y - 40) / 170);
+      const boundL = 14 + 180 * tL * tL;
+      if (ball.x < boundL + ball.r) { ball.x = boundL + ball.r; ball.vx = Math.abs(ball.vx) * 0.5; }
+    }
+  }
+
+  // dtScale is "how many 60fps-frame-equivalents this real callback covers" (1.0 at exactly
+  // 60fps). Every per-frame constant below was originally tuned assuming dtScale===1 always;
+  // multiplying by it keeps the same feel at any actual frame rate instead of the whole game
+  // running in slow motion when fps drops below 60.
+  function update(dtScale) {
+    if (gameOver) return;
+
+    if (launching) {
+      launchPower = Math.min(launchPower + 2.2 * dtScale, 100);
+    }
+
+    for (const k of kickbacks) { if (k.hit > 0) k.hit = Math.max(0, k.hit - dtScale); }
+    for (const s of slingshots) { if (s.hit > 0) s.hit = Math.max(0, s.hit - dtScale); }
+    for (const b of bumpers) { if (b.hit > 0) b.hit = Math.max(0, b.hit - dtScale); }
+    for (const l of topLanes) { if (l.hit > 0) l.hit = Math.max(0, l.hit - dtScale); }
+    for (const l of ceilingLamps) { if (l.litFrames > 0) { l.litFrames -= dtScale; if (l.litFrames <= 0) { l.litFrames = 0; l.lit = false; } } }
+    for (const s of laneSensors) { if (s.hit > 0) s.hit = Math.max(0, s.hit - dtScale); }
+    for (const t of dropTargets) { if (t.hit > 0) t.hit = Math.max(0, t.hit - dtScale); }
+    for (const g of oneWayGates) { if (g.hit > 0) g.hit = Math.max(0, g.hit - dtScale); }
+    if (upPost.hit > 0) upPost.hit = Math.max(0, upPost.hit - dtScale);
+    if (lockHole.hit > 0) lockHole.hit = Math.max(0, lockHole.hit - dtScale);
+    if (multiplierFrames > 0) {
+      multiplierFrames -= dtScale;
+      if (multiplierFrames <= 0) {
+        multiplierFrames = 0;
+        scoreMultiplier = 1;
+      }
+    }
+    if (upPostFrames > 0) upPostFrames = Math.max(0, upPostFrames - dtScale);
+    {
+      // shared status line: lock progress / multiball, 2x score-time window, up-post countdown
+      const parts = [];
+      if (multiball) parts.push('MULTIBALL');
+      else if (pendingMultiball) parts.push('LOCK ' + LOCK_CAPACITY + '/' + LOCK_CAPACITY);
+      else if (lockedCount > 0) parts.push('LOCK ' + lockedCount + '/' + LOCK_CAPACITY);
+      if (multiplierFrames > 0) parts.push('×' + scoreMultiplier + '  ' + Math.ceil(multiplierFrames / 60) + 's');
+      if (upPostFrames > 0) parts.push('POST ' + Math.ceil(upPostFrames / 60) + 's');
+      multInfoEl.textContent = parts.join('   ');
+    }
+
+    // keep every waiting ball parked at the plunger; track whether one is there
+    for (const b of balls) if (b.inLane) b.x = LANE_X + 16;
+    ballInLane = balls.some((b) => b.inLane);
+
+    // captive-ball kickback hold - counted per frame (not per substep), one timer per kickback
+    for (const k of kickbacks) {
+      if (!k.holding) continue;
+      k.holdTimer -= dtScale;
+      if (k.holdTimer <= 0) {
+        const b = k.heldBall;
+        if (b) { b.vx = k.dir.x * 20; b.vy = k.dir.y * 20; b.held = false; }
+        k.holding = false;
+        k.enabled = false;
+        k.hit = 14;
+        k.heldBall = null;
+      }
+    }
+
+    // multiball release: both balls locked and the latest plunge has carried a ball up the field
+    if (pendingMultiball && balls.some((b) => !b.inLane && !b.locked && !b.held && b.y < 260)) {
+      pendingMultiball = false;
+      multiball = true;
+      lockedCount = 0;
+      for (const b of balls) {
+        if (!b.locked) continue;
+        b.locked = false;
+        b.x = lockHole.x + (Math.random() * 16 - 8);
+        b.y = lockHole.y + 18;
+        b.vx = Math.random() * 4 - 2;
+        b.vy = 3 + Math.random() * 2;
+      }
+      flashTexts.push({ text: 'MULTIBALL!', x: FIELD_MID, y: 150, life: 150 });
+      AudioSys.play('multiball');
+    }
+
+    // substep every ball that is actually in motion (not parked, locked, or held). Flippers
+    // animate once per substep so a fast swing can't sweep past a ball without overlapping it;
+    // if nothing is moving, the flippers still tick once so they keep animating.
+    const frictionFactor = Math.pow(AIR_FRICTION, dtScale);
+    let maxSpeed = 0, anyActive = false;
+    for (const b of balls) {
+      if (b.inLane || b.locked || b.held) continue;
+      anyActive = true;
+      const sp = Math.hypot(b.vx, b.vy);
+      if (sp > maxSpeed) maxSpeed = sp;
+    }
+    if (!anyActive) {
+      updateFlipper(flipperL, 1, dtScale);
+      updateFlipper(flipperR, 1, dtScale);
+    } else {
+      const steps = Math.min(20, Math.max(4, Math.ceil((maxSpeed * dtScale) / 6)));
+      for (let i = 0; i < steps; i++) {
+        updateFlipper(flipperL, steps, dtScale);
+        updateFlipper(flipperR, steps, dtScale);
+        for (const b of balls) {
+          if (b.inLane || b.locked || b.held) continue;
+          ball = b;
+          b.vy += (GRAVITY * dtScale) / steps;
+          b.vx *= frictionFactor;
+          b.vy *= frictionFactor;
+          b.x += (b.vx * dtScale) / steps;
+          b.y += (b.vy * dtScale) / steps;
+          resolveAllCollisions();
+          checkTopLanes();
+          checkCeilingLamps();
+          checkLaneSensors();
+          checkLockHole();
+        }
+        if (balls.length > 1) resolveBallBall();
+      }
+    }
+
+    // drain / recycle pass over every ball
+    const survivors = [];
+    let realDrains = 0;
+    for (const b of balls) {
+      if (!b.inLane && !b.locked && !b.held && b.y > DRAIN_Y + 20) {
+        if (b.x > LANE_X - 2) {
+          // fell back into the plunger lane rather than a real drain - hand it back to the plunger
+          b.x = LANE_X + 16; b.y = H - 60; b.vx = 0; b.vy = 0; b.inLane = true;
+          survivors.push(b);
+        } else {
+          realDrains++; // gone
+        }
+      } else {
+        survivors.push(b);
+      }
+    }
+    if (realDrains > 0) {
+      balls = survivors;
+      // a held ball (kickback) still counts as in play - it's coming back. only balls sitting in
+      // the lock are "parked". if nothing is left in play, the ball in play was lost.
+      const inPlay = survivors.filter((b) => !b.locked);
+      if (inPlay.length === 0) {
+        loseBall(); // keeps the locked balls, serves a fresh one - or ends the game
+        return;
+      }
+      if (multiball && inPlay.length <= 1) {
+        multiball = false; // back to a single ball - multiball is over, normal rules resume
+      }
+    }
+
+    // flash texts
+    flashTexts.forEach(t => { t.y -= 0.6 * dtScale; t.life -= dtScale; });
+    flashTexts = flashTexts.filter(t => t.life > 0);
+  }
+
+  // ---------- drawing ----------
+  function drawWall(seg, color = '#4a5a7a', width = 6) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(seg.x1, seg.y1);
+    ctx.lineTo(seg.x2, seg.y2);
+    ctx.stroke();
+  }
+
+  function drawFlipper(f) {
+    const tip = flipperTip(f);
+    const angle = Math.atan2(tip.y - f.py, tip.x - f.px);
+    const baseR = f.thickness * 1.3; // thick at the root
+    const tipR = f.thickness * 0.7; // thin but visibly rounded at the tip
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    // base cap bulges backward (away from the tip), tip cap bulges forward (away from the base) -
+    // the angle pairs were swapped before, which left the tip cap's fill unclosed and see-through
+    ctx.arc(f.px, f.py, baseR, angle - Math.PI / 2, angle + Math.PI / 2, true);
+    ctx.arc(tip.x, tip.y, tipR, angle + Math.PI / 2, angle - Math.PI / 2, true);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(f.px, f.py, 6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // background field
+    ctx.fillStyle = '#111324';
+    ctx.fillRect(0, 0, W, H);
+
+    // corner wedges (decorative, echoes the dark border area outside the playfield curve)
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath();
+    ctx.moveTo(WALL, 210);
+    domeLeft.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.lineTo(WALL, 40); ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(W - WALL, 140);
+    domeRight.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.lineTo(W - WALL, 40); ctx.lineTo(W - WALL, 140); ctx.closePath(); ctx.fill();
+
+    // the deflector bumps are solid, filled the same as the walls - not hollow outlines
+    ctx.fillStyle = '#4a5a7a';
+    ctx.beginPath();
+    ctx.moveTo(WALL, BULGE_TOP);
+    leftBulge.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.lineTo(WALL, BULGE_TOP); ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(LANE_X, BULGE_TOP);
+    rightBulge.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.lineTo(LANE_X, BULGE_TOP); ctx.closePath(); ctx.fill();
+
+    // walls (segments marked non-visible are still solid for collision, just not drawn) - this
+    // also draws the orbit flat rails, since they're just ordinary entries in `walls`
+    for (const seg of walls) { if (seg.visible !== false) drawWall(seg, seg.color || '#4a5a7a'); }
+
+    // one-way gates - a thin flap at the shooter lane exit; dim normally, flares white on a block
+    for (const g of oneWayGates) {
+      ctx.strokeStyle = g.hit > 0 ? '#ffffff' : '#6a7a9a';
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.shadowColor = '#ffffff';
+      ctx.shadowBlur = g.hit > 0 ? 10 : 0;
+      ctx.beginPath();
+      ctx.moveTo(g.x1, g.y1);
+      ctx.lineTo(g.x2, g.y2);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // lock hole - dark cup under the arch; purple ring while it can still take a ball, amber once
+    // both are locked (plunge to start multiball), flares white on a capture
+    {
+      const armed = !multiball && !pendingMultiball && lockedCount < LOCK_CAPACITY;
+      ctx.beginPath();
+      ctx.arc(lockHole.x, lockHole.y, lockHole.r, 0, Math.PI * 2);
+      ctx.fillStyle = '#0a0a12';
+      ctx.fill();
+      ctx.strokeStyle = lockHole.hit > 0 ? '#ffffff' : (armed ? '#c98aff' : (pendingMultiball ? '#ffd23d' : '#4a3a5a'));
+      ctx.lineWidth = 3;
+      ctx.shadowColor = ctx.strokeStyle;
+      ctx.shadowBlur = (lockHole.hit > 0 || armed || pendingMultiball) ? 12 : 0;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // top lanes - a lamp bar per lane: dim until lit, stays lit once crossed, white-hot flash
+    // right at the moment of crossing
+    for (const l of topLanes) {
+      const pulse = l.hit > 0;
+      ctx.fillStyle = pulse ? '#ffffff' : (l.lit ? '#fff86b' : 'rgba(255,248,107,0.28)');
+      ctx.shadowColor = '#fff86b';
+      ctx.shadowBlur = pulse ? 14 : 0; // ambient glow while lit dropped - could stay lit indefinitely
+      ctx.fillRect(l.x1 + 3, TOP_LANE_TOP - 6, (l.x2 - l.x1) - 6, 5);
+      ctx.shadowBlur = 0;
+    }
+
+    // ceiling lamps - 5 small dots along the dome, each glows on its own 3s fade; light all 5 for
+    // the 2x score-time bonus
+    for (const l of ceilingLamps) {
+      ctx.beginPath();
+      ctx.arc(l.x, l.y, CEILING_LAMP_R, 0, Math.PI * 2);
+      ctx.fillStyle = l.lit ? '#baffc9' : 'rgba(186,255,201,0.25)';
+      ctx.shadowColor = '#baffc9';
+      ctx.shadowBlur = l.lit ? 8 : 0;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    // lane sensors - plain gray tripwires across the return lane and outlane, flash on a pass.
+    // drawn as a vertical mark centered in the sensor's zone rather than a bar across it.
+    for (const s of laneSensors) {
+      const pulse = s.hit > 0;
+      const midX = (s.x1 + s.x2) / 2;
+      ctx.strokeStyle = pulse ? '#ffffff' : '#7a7a86';
+      ctx.lineWidth = 2;
+      ctx.shadowColor = '#ffffff';
+      ctx.shadowBlur = pulse ? 10 : 0;
+      ctx.beginPath();
+      ctx.moveTo(midX, s.y - 8);
+      ctx.lineTo(midX, s.y + 8);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // drop targets - a small standing bar per target, flash on the hit that drops it, hidden once down
+    for (const t of dropTargets) {
+      if (t.down) continue;
+      const glow = t.hit > 0;
+      ctx.strokeStyle = glow ? '#ffffff' : '#e8b04a';
+      ctx.lineWidth = 6;
+      ctx.lineCap = 'round';
+      ctx.shadowColor = '#e8b04a';
+      ctx.shadowBlur = glow ? 14 : 0; // ambient glow dropped - several of these render every frame
+      ctx.beginPath();
+      ctx.moveTo(t.x1, t.y1);
+      ctx.lineTo(t.x2, t.y2);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // bumpers - pop bumpers with a dark cap, flash white on hit
+    for (const b of bumpers) {
+      const glow = b.hit > 0;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fillStyle = glow ? '#ffffff' : '#ff5d8f';
+      ctx.shadowColor = '#ff5d8f';
+      ctx.shadowBlur = glow ? 20 : 0; // ambient glow dropped - 3 of these render every frame
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r * 0.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+    }
+
+    // kickbacks - dim and flat once spent for this ball, bright gold while armed, pulsing white
+    // while winding up to launch a caught ball
+    for (const k of kickbacks) {
+      const glow = k.hit > 0;
+      ctx.fillStyle = k.holding ? '#ffffff' : (!k.enabled ? '#3a3a42' : (glow ? '#ffe066' : '#7a6a3a'));
+      ctx.strokeStyle = k.holding ? '#ffffff' : (!k.enabled ? '#55555f' : (glow ? '#ffe066' : '#a08a4a'));
+      ctx.lineWidth = 2;
+      ctx.shadowColor = '#ffcf4d';
+      ctx.shadowBlur = k.holding ? 12 + 8 * Math.sin(k.holdTimer * 0.9) : (k.enabled && glow ? 16 : 0);
+      ctx.beginPath();
+      ctx.arc(k.x, k.y, k.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // slingshots - rounded-corner parallelograms forming the return lane's outer wall
+    for (const s of slingshots) {
+      const glow = s.hit > 0;
+      ctx.beginPath();
+      ctx.moveTo(s.pts[0].x, s.pts[0].y);
+      for (let i = 1; i < s.pts.length; i++) ctx.lineTo(s.pts[i].x, s.pts[i].y);
+      ctx.closePath();
+      ctx.lineJoin = 'round';
+      ctx.fillStyle = glow ? '#ffffff' : s.color;
+      ctx.strokeStyle = glow ? '#ffffff' : s.color;
+      ctx.lineWidth = 10;
+      ctx.shadowColor = s.color;
+      ctx.shadowBlur = glow ? 18 : 0; // ambient glow dropped - both slingshots render every frame
+      ctx.fill();
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // up-post - only drawn while armed; green, flashes white on a save, blinks its last 3 seconds
+    if (upPostFrames > 0) {
+      const blinkOff = upPostFrames < 180 && Math.floor(upPostFrames / 10) % 2 === 1;
+      if (!blinkOff) {
+        const pulse = upPost.hit > 0;
+        ctx.beginPath();
+        ctx.arc(upPost.x, upPost.y, upPost.r, 0, Math.PI * 2);
+        ctx.fillStyle = pulse ? '#ffffff' : '#4dff88';
+        ctx.shadowColor = '#4dff88';
+        ctx.shadowBlur = pulse ? 16 : 8;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    // flippers
+    drawFlipper(flipperL);
+    drawFlipper(flipperR);
+
+    // launch lane plunger rod (retracts as power charges, then releases)
+    const laneBall = balls.find((b) => b.inLane);
+    if (laneBall) {
+      const bottomY = H - 20;
+      const restTopY = laneBall.y + 14;
+      const rodTop = restTopY + (launchPower / 100) * (bottomY - restTopY - 10);
+      const rodX = laneBall.x;
+      ctx.strokeStyle = launchPower > 0 ? '#7fd8ff' : '#5a6480';
+      ctx.lineWidth = 6;
+      ctx.lineCap = 'round';
+      ctx.shadowColor = '#5cf';
+      ctx.shadowBlur = launchPower > 0 ? 10 : 0;
+      ctx.beginPath();
+      ctx.moveTo(rodX, rodTop);
+      ctx.lineTo(rodX, bottomY);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.beginPath();
+      ctx.arc(rodX, rodTop, 5, 0, Math.PI * 2);
+      ctx.fillStyle = launchPower > 0 ? '#7fd8ff' : '#8892b0';
+      ctx.fill();
+    }
+
+    // balls - locked ones tint gold, the rest steel
+    for (const b of balls) {
+      const grad = ctx.createRadialGradient(b.x - 3, b.y - 3, 1, b.x, b.y, b.r);
+      grad.addColorStop(0, '#ffffff');
+      grad.addColorStop(1, b.locked ? '#d8b25a' : '#9aa4c0');
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+    }
+
+    // flash texts
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    flashTexts.forEach(t => {
+      ctx.fillStyle = `rgba(255,255,150,${Math.min(1, t.life / 20)})`;
+      ctx.fillText(t.text, t.x, t.y);
+    });
+
+    // sound state hint, bottom-left corner
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = AudioSys.isMuted() ? 'rgba(150,150,170,0.5)' : 'rgba(127,216,255,0.6)';
+    ctx.fillText(AudioSys.isMuted() ? '♪ OFF (M)' : '♪ ON (M)', WALL + 6, H - 24);
+  }
+
+  // dt-scaled loop: `now` is the timestamp rAF hands the callback, used to measure real elapsed
+  // time so physics stays frame-rate independent (see the dtScale comment on update() above).
+  // Clamped to 50ms so a backgrounded/paused tab doesn't dump a giant catch-up jump on resume.
+  let lastFrameTime = null;
+  let smoothedDtScale = 1;
+  function loop(now) {
+    if (lastFrameTime !== null) {
+      const dt = Math.min(Math.max((now - lastFrameTime) / 1000, 0), 0.05);
+      const instant = dt * 60;
+      // raw per-frame dt is noisy even at a rock-steady fps (a few ms of jitter either way is
+      // normal) - smoothing it keeps the physics reacting to real fps changes without every
+      // little timing wobble showing up as visibly uneven ball motion
+      smoothedDtScale = smoothedDtScale * 0.85 + instant * 0.15;
+    }
+    lastFrameTime = now;
+    update(smoothedDtScale);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  resetBall();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
