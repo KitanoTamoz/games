@@ -7,7 +7,9 @@
  *     ペン（クリックで反転）… クリックしたセルの生死を切り替える
  *     パターン名        … クリックした位置（左上）にパターンを置く。「向き」で回転
  * - 「全消去」チェックボックスで盤面を消す。
+ * - 盤面の上下・左右の端はつながっている（トーラス）。
  * - 定型パターンは「パターン」シートで追加・削除できる（O=生、.=死、/=改行）。
+ *   C列の表示名（名前＋横×縦の大きさ）はシートの関数で自動作成され、プルダウンに使われる。
  *   盤面で範囲を選択 → メニュー「選択範囲をパターンに登録」でも追加できる。
  *
  * 導入: 拡張機能 → Apps Script → このコードを貼り付けて保存 → シートを再読み込み
@@ -58,7 +60,7 @@ function inBoard_(row, col) {
 
 /* ---------------- 計算・再生 ---------------- */
 
-/** 色の盤面から次世代の色の盤面を作る。生き残りは元の色、誕生は ALIVE。盤外は死。 */
+/** 色の盤面から次世代の色の盤面を作る。生き残りは元の色、誕生は ALIVE。端はループする。 */
 function nextColors_(colors) {
   const alive = colors.map(r => r.map(c => (isAlive_(c) ? 1 : 0)));
   const out = [];
@@ -68,10 +70,9 @@ function nextColors_(colors) {
     for (let j = 0; j < N; j++) {
       let n = 0;
       for (let di = -1; di <= 1; di++) {
-        const r = alive[i + di];
-        if (!r) continue;
+        const r = alive[(i + di + N) % N];
         for (let dj = -1; dj <= 1; dj++) {
-          if ((di || dj) && r[j + dj]) n++;
+          if ((di || dj) && r[(j + dj + N) % N]) n++;
         }
       }
       const me = alive[i][j];
@@ -185,11 +186,17 @@ function onSelectionChange(e) {
   const turns = Math.round((parseInt(sheet.getRange(ROTATE).getValue(), 10) || 0) / 90) % 4;
   for (let t = 0; t < turns; t++) shape = rotate_(shape);
 
-  // 盤面からはみ出す部分は切り取る
-  const h = Math.min(shape.length, BOARD_TOP + N - row);
-  const w = Math.min(shape[0].length, BOARD_LEFT + N - col);
-  const out = shape.slice(0, h).map(line => line.slice(0, w).map(v => (v ? ALIVE : DEAD)));
-  sheet.getRange(row, col, h, w).setBackgrounds(out);
+  // 盤面からはみ出す部分は反対側の端へ回り込ませる（ループ）
+  const grid = sheet.getRange(BOARD_TOP, BOARD_LEFT, N, N);
+  const colors = grid.getBackgrounds();
+  const top = row - BOARD_TOP, left = col - BOARD_LEFT;
+  const h = Math.min(shape.length, N), w = Math.min(shape[0].length, N);
+  for (let i = 0; i < h; i++) {
+    for (let j = 0; j < w; j++) {
+      colors[(top + i) % N][(left + j) % N] = shape[i][j] ? ALIVE : DEAD;
+    }
+  }
+  grid.setBackgrounds(colors);
 }
 
 /* ---------------- パターン ---------------- */
@@ -208,8 +215,9 @@ function parseShape_(text) {
 function findPattern_(name) {
   const sheet = SpreadsheetApp.getActive().getSheetByName(PATTERNS);
   if (!sheet || sheet.getLastRow() < 2) return null;
-  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues();
-  const hit = rows.find(r => String(r[0]) === name && String(r[1]).trim() !== '');
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();  // A名前 B形 C表示名
+  const hit = rows.find(r => (String(r[2]) === name || String(r[0]) === name) &&
+                             String(r[1]).trim() !== '');
   return hit ? parseShape_(hit[1]) : null;
 }
 
@@ -246,6 +254,8 @@ function registerPattern() {
   const res = ui.prompt('パターンの名前', text, ui.ButtonSet.OK_CANCEL);
   const name = res.getResponseText().trim();
   if (res.getSelectedButton() !== ui.Button.OK || !name) return;
-  SpreadsheetApp.getActive().getSheetByName(PATTERNS).appendRow([name, text]);
+  const ps = SpreadsheetApp.getActive().getSheetByName(PATTERNS);
+  const last = ps.getRange('A:A').getValues().filter(String).length;   // A列の最終行
+  ps.getRange(last + 1, 1, 1, 2).setValues([[name, text]]);            // C列(表示名)は関数で自動
   ui.alert('「' + name + '」を登録しました。「入力」プルダウンから選べます。');
 }
